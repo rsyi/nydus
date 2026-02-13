@@ -19,37 +19,108 @@ cargo install --path .
 
 ## Quick Start
 
-1. **Initialize nydus**:
-   ```bash
-   nydus init
-   ```
+### 1. Install nydus
 
-2. **Configure a profile** (edit `~/.nydus/config.yaml`):
-   ```yaml
-   profiles:
-     - name: dev
-       region: us-east-1
-       instance_type: t3.medium
-       ssh_user: ubuntu
-       ssh_key_path: ~/.ssh/id_ed25519
-       volume_size_gb: 20
-       sync_credentials:
-         enabled: true
-         git:
-           ssh_keys:
-             - ~/.ssh/id_ed25519
-           config: true
-   ```
+```bash
+cargo install --path .
+# Or use the alias from your shell config
+```
 
-3. **Create an instance**:
-   ```bash
-   nydus up mydev --profile dev
-   ```
+### 2. Initialize nydus
 
-4. **Connect to it**:
-   ```bash
-   nydus attach mydev
-   ```
+```bash
+nydus init
+```
+
+This creates `~/.nydus/` with a default profile configured with credential sync.
+
+### 3. Set up AWS Prerequisites
+
+#### A. Create IAM User (if you don't have one)
+
+1. **Log in to AWS Console**
+2. Go to **IAM** → **Users** → **Create user**
+3. User name: `nydus-user` (or your preferred name)
+4. Click **Next**
+5. **Attach policies directly** → Select **AmazonEC2FullAccess** (or use the custom policy below)
+6. Click **Create user**
+
+#### B. Create Access Keys
+
+1. In **IAM** → **Users** → Select your user → **Security credentials**
+2. Scroll to **Access keys** → **Create access key**
+3. Choose **Command Line Interface (CLI)**
+4. Check "I understand..." → **Next** → **Create access key**
+5. **Download** or copy the:
+   - Access key ID (starts with `AKIA...`)
+   - Secret access key (long random string)
+
+#### C. Configure AWS Credentials
+
+Create or edit `~/.aws/credentials`:
+
+```bash
+mkdir -p ~/.aws
+cat > ~/.aws/credentials << 'EOF'
+[default]
+aws_access_key_id = YOUR_ACCESS_KEY_ID
+aws_secret_access_key = YOUR_SECRET_ACCESS_KEY
+EOF
+chmod 600 ~/.aws/credentials
+```
+
+Create or edit `~/.aws/config`:
+
+```bash
+cat > ~/.aws/config << 'EOF'
+[default]
+region = us-east-1
+output = json
+EOF
+```
+
+#### D. Create EC2 Key Pair
+
+1. Go to **EC2** → **Key Pairs** (under Network & Security)
+2. Click **Create key pair**
+3. Name: `nydus-key` (or any name you prefer)
+4. Key pair type: **ED25519** (recommended) or **RSA**
+5. Private key file format: **.pem**
+6. Click **Create key pair** → Download the .pem file
+
+Move the key to the right location:
+
+```bash
+mv ~/Downloads/nydus-key.pem ~/.ssh/nydus-key.pem
+chmod 600 ~/.ssh/nydus-key.pem
+```
+
+Update your nydus config (`~/.nydus/config.yaml`) to use this key:
+
+```yaml
+profiles:
+  - name: default
+    ssh_key_path: ~/.ssh/nydus-key.pem
+    # ... rest of config
+```
+
+### 4. Create Your First Instance
+
+```bash
+# Profile defaults to "default" if not specified
+nydus up mydev
+
+# Or explicitly specify profile
+nydus up mydev --profile default
+```
+
+### 5. Connect to It
+
+```bash
+nydus attach mydev
+```
+
+That's it! Your EC2 instance is ready with all your credentials synced.
 
 ## Commands
 
@@ -126,13 +197,23 @@ profiles:
 
 ## AWS Permissions
 
-Nydus requires the following IAM permissions:
+### Option 1: Use AmazonEC2FullAccess (Easiest)
+
+When creating your IAM user, attach the **AmazonEC2FullAccess** managed policy. This gives full EC2 permissions.
+
+### Option 2: Use Custom Policy (More Restrictive)
+
+For better security, create a custom policy with only the permissions nydus needs:
+
+1. **IAM** → **Policies** → **Create policy** → **JSON**
+2. Paste the policy below:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "NydusEC2Permissions",
       "Effect": "Allow",
       "Action": [
         "ec2:RunInstances",
@@ -140,19 +221,26 @@ Nydus requires the following IAM permissions:
         "ec2:StopInstances",
         "ec2:TerminateInstances",
         "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
         "ec2:DescribeImages",
         "ec2:DescribeSecurityGroups",
         "ec2:CreateSecurityGroup",
         "ec2:AuthorizeSecurityGroupIngress",
         "ec2:CreateTags",
         "ec2:DescribeSubnets",
-        "ec2:DescribeVpcs"
+        "ec2:DescribeVpcs",
+        "ec2:DescribeKeyPairs"
       ],
       "Resource": "*"
     }
   ]
 }
 ```
+
+3. Name it: `NydusPolicy`
+4. Attach it to your IAM user
+
+**Note**: The `"Resource": "*"` is required for EC2 instance operations as you don't know instance IDs before creation.
 
 ## Development Status
 

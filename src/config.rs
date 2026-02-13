@@ -114,18 +114,43 @@ pub struct Profile {
 
 impl Default for Profile {
     fn default() -> Self {
+        let mut tags = HashMap::new();
+        tags.insert("Environment".to_string(), "development".to_string());
+        tags.insert("ManagedBy".to_string(), "nydus".to_string());
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("EDITOR".to_string(), "vim".to_string());
+        env_vars.insert("NODE_ENV".to_string(), "development".to_string());
+
         Profile {
             name: "default".to_string(),
             region: "us-east-1".to_string(),
             instance_type: "t3.medium".to_string(),
-            ami: None,
+            ami: None,  // Will auto-resolve to latest Ubuntu
             ssh_user: "ubuntu".to_string(),
             ssh_key_path: "~/.ssh/id_ed25519".to_string(),
             security_group: None,
             subnet_id: None,
-            volume_size_gb: 20,
-            tags: HashMap::new(),
-            sync_credentials: SyncCredentials::default(),
+            volume_size_gb: 30,
+            tags,
+            sync_credentials: SyncCredentials {
+                enabled: true,
+                git: GitSync {
+                    ssh_keys: vec!["~/.ssh/id_ed25519".to_string()],
+                    config: true,
+                    gpg_keys: false,
+                },
+                claude: ClaudeSync {
+                    enabled: true,
+                    session_file: Some("~/.claude/session_token".to_string()),
+                    api_key_env: Some("CLAUDE_API_KEY".to_string()),
+                },
+                aws: AwsSync {
+                    enabled: false,
+                },
+                env_vars,
+                dotfiles: vec!["~/.vimrc".to_string()],
+            },
         }
     }
 }

@@ -38,3 +38,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 home = "0.5"  # Cross-platform home directory
 reqwest = "0.12"  # HTTP client for getting public IP
+colored = "2.1"  # Terminal colors
