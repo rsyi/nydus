@@ -1,0 +1,48 @@
+profiles:
+  - name: dev
+    region: us-east-1
+    instance_type: t3.medium
+    ami: null  # Will use latest Ubuntu
+    ssh_user: ubuntu
+    ssh_key_path: ~/.ssh/id_ed25519
+    security_group: null  # Will create default
+    subnet_id: null
+    volume_size_gb: 20
+    tags:
+      Environment: development
+      ManagedBy: nydus
+    sync_credentials:
+      enabled: true
+      git:
+        ssh_keys:
+          - ~/.ssh/id_ed25519
+          - ~/.ssh/github_rsa
+        config: true
+        gpg_keys: false
+      claude:
+        enabled: true
+        session_file: ~/.claude/session_token
+        api_key_env: ANTHROPIC_API_KEY
+      aws:
+        enabled: false
+      env_vars:
+        NODE_ENV: development
+        EDITOR: vim
+      dotfiles:
+        - ~/.vimrc
+        - ~/.tmux.conf
+
+  - name: prod
+    region: us-west-2
+    instance_type: t3.large
+    ami: null
+    ssh_user: ubuntu
+    ssh_key_path: ~/.ssh/id_rsa
+    security_group: null
+    subnet_id: null
+    volume_size_gb: 40
+    tags:
+      Environment: production
+      ManagedBy: nydus
+    sync_credentials:
+      enabled: false

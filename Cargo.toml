@@ -1,0 +1,40 @@
+[package]
+name = "nydus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "cargo", "env"] }
+clap_complete = "4.5"
+
+# TUI
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# AWS
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-ec2 = "1.82"
+
+# State
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Config
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Async
+tokio = { version = "1.40", features = ["full"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+chrono = "0.4"
+home = "0.5"  # Cross-platform home directory
+reqwest = "0.12"  # HTTP client for getting public IP
