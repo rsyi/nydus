@@ -14,6 +14,10 @@ pub fn attach(instance: &Instance) -> Result<()> {
 
     println!("Connecting to {}@{}...", ssh_user, host);
 
+    // Try to attach to existing tmux session, or create new one
+    // Command: if tmux ls &>/dev/null; then tmux a; else tmux; fi
+    let tmux_command = "if tmux ls &>/dev/null; then tmux a; else tmux; fi";
+
     let status = Command::new("ssh")
         .arg("-i")
         .arg(ssh_key_path)
@@ -21,7 +25,9 @@ pub fn attach(instance: &Instance) -> Result<()> {
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
+        .arg("-t")  // Force pseudo-terminal allocation for tmux
         .arg(format!("{}@{}", ssh_user, host))
+        .arg(tmux_command)
         .status()
         .map_err(|e| NydusError::SshError(format!("Failed to run ssh: {}", e)))?;
 
