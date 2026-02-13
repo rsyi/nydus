@@ -3,6 +3,8 @@ use crate::error::{NydusError, Result};
 use crate::util;
 use aws_sdk_ec2::types::{Filter, InstanceStateName, ResourceType, Tag, TagSpecification};
 use aws_sdk_ec2::Client;
+use colored::*;
+use std::time::Instant;
 
 /// Initialize an EC2 client for the specified region
 pub async fn initialize_ec2_client(region: &str) -> Result<Client> {
@@ -42,11 +44,15 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
     // Build tags
     let mut tags = vec![
         Tag::builder().key("Name").value(name).build(),
-        Tag::builder()
+    ];
+
+    // Add ManagedBy tag only if not already in profile tags
+    if !profile.tags.contains_key("ManagedBy") {
+        tags.push(Tag::builder()
             .key("ManagedBy")
             .value("nydus")
-            .build(),
-    ];
+            .build());
+    }
 
     for (key, value) in &profile.tags {
         tags.push(Tag::builder().key(key).value(value).build());
@@ -75,7 +81,10 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
         .tag_specifications(tag_spec)
         .send()
         .await
-        .map_err(|e| NydusError::AwsError(format!("Failed to launch instance: {}", e)))?;
+        .map_err(|e| {
+            let err_msg = format!("{:?}", e);
+            NydusError::AwsError(format!("Failed to launch instance: {}", err_msg))
+        })?;
 
     let ec2_instance = run_result
         .instances()
@@ -92,7 +101,13 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
     wait_for_instance_running(&client, &instance_id).await?;
 
     // Refresh instance details
-    describe_instance(&client, &instance_id, name, profile).await
+    let instance = describe_instance(&client, &instance_id, name, profile).await?;
+
+    // Wait for SSH to be ready with retries
+    println!("Waiting for SSH to be ready...");
+    wait_for_ssh_ready(&instance).await?;
+
+    Ok(instance)
 }
 
 /// Start a stopped instance
@@ -229,35 +244,176 @@ pub async fn refresh_instance(instance: &Instance) -> Result<Instance> {
 
 /// Wait for instance to reach running state
 async fn wait_for_instance_running(client: &Client, instance_id: &str) -> Result<()> {
-    loop {
-        let result = client
-            .describe_instances()
-            .instance_ids(instance_id)
-            .send()
-            .await
-            .map_err(|e| NydusError::AwsError(format!("Failed to describe instance: {}", e)))?;
+    use std::sync::Arc;
 
-        let state = result
-            .reservations()
-            .first()
-            .and_then(|r| r.instances().first())
-            .and_then(|i| i.state())
-            .and_then(|s| s.name());
+    let start_time = Arc::new(Instant::now());
 
-        match state {
-            Some(InstanceStateName::Running) => {
-                println!("Instance is running");
-                return Ok(());
+    print!("⏱  Waiting for instance to start... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    // Spawn timer update task
+    let timer_start = start_time.clone();
+    let timer_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let elapsed = timer_start.elapsed();
+            let elapsed_str = format!("{:.1}s", elapsed.as_secs_f64());
+            print!("\r⏱  Waiting for instance to start... {}     ", elapsed_str.truecolor(255, 165, 0).bold());
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+        }
+    });
+
+    // Check instance state
+    let client_clone = client.clone();
+    let instance_id_clone = instance_id.to_string();
+    let check_start = start_time.clone();
+    let check_task = tokio::spawn(async move {
+        let mut not_found_retries = 0;
+        let max_not_found_retries = 10;
+
+        loop {
+            if check_start.elapsed() >= tokio::time::Duration::from_secs(300) {
+                return Err(NydusError::AwsError("Instance did not start within 5 minutes".to_string()));
             }
-            Some(InstanceStateName::Terminated) | Some(InstanceStateName::ShuttingDown) => {
-                return Err(NydusError::AwsError("Instance terminated".to_string()));
-            }
-            _ => {
-                print!(".");
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            let result = client_clone
+                .describe_instances()
+                .instance_ids(&instance_id_clone)
+                .send()
+                .await;
+
+            match result {
+                Err(e) => {
+                    let error_msg = format!("{:?}", e);
+                    if error_msg.contains("InvalidInstanceID.NotFound") && not_found_retries < max_not_found_retries {
+                        not_found_retries += 1;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    } else {
+                        return Err(NydusError::AwsError(format!(
+                            "Failed to describe instance '{}': {:?}\n\
+                             This could mean:\n\
+                             - IAM permissions issue (check DescribeInstances permission)\n\
+                             - Instance was created in a different region\n\
+                             - Instance ID is invalid",
+                            instance_id_clone, e
+                        )));
+                    }
+                }
+                Ok(result) => {
+                    let state = result
+                        .reservations()
+                        .first()
+                        .and_then(|r| r.instances().first())
+                        .and_then(|i| i.state())
+                        .and_then(|s| s.name());
+
+                    match state {
+                        Some(InstanceStateName::Running) => {
+                            return Ok(());
+                        }
+                        Some(InstanceStateName::Terminated) | Some(InstanceStateName::ShuttingDown) => {
+                            return Err(NydusError::AwsError("Instance terminated".to_string()));
+                        }
+                        _ => {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
             }
         }
+    });
+
+    // Wait for check to complete
+    let result = check_task.await.map_err(|e| NydusError::AwsError(format!("Task error: {}", e)))?;
+
+    // Give the timer a moment to catch up and display the final time
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Calculate final elapsed time before stopping timer
+    let final_elapsed = start_time.elapsed();
+
+    // Stop the timer task
+    timer_task.abort();
+
+    // Clear line and show final message
+    print!("\r\x1b[2K");
+
+    match result {
+        Ok(_) => {
+            let final_time = format!("{:.1}s", final_elapsed.as_secs_f64());
+            print!("✓ Instance is running! ");
+            println!("{}", format!("({})", final_time).dimmed());
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Wait for SSH to be ready on the instance
+async fn wait_for_ssh_ready(instance: &Instance) -> Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let max_duration = tokio::time::Duration::from_secs(60);
+    let start_time = Arc::new(Instant::now());
+
+    print!("⏱  Waiting for SSH to be ready... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    // Spawn timer update task
+    let timer_start = start_time.clone();
+    let timer_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let elapsed = timer_start.elapsed();
+            let elapsed_str = format!("{:.1}s", elapsed.as_secs_f64());
+            print!("\r⏱  Waiting for SSH to be ready... {}     ", elapsed_str.truecolor(255, 165, 0).bold());
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+        }
+    });
+
+    // Check SSH readiness
+    let instance_clone = instance.clone();
+    let check_start = start_time.clone();
+    let check_task = tokio::spawn(async move {
+        loop {
+            if check_start.elapsed() >= max_duration {
+                return Err(NydusError::SshError("SSH did not become ready within 60 seconds".to_string()));
+            }
+
+            match crate::ssh::run_remote_command(&instance_clone, "echo 'ready'") {
+                Ok(_) => return Ok(()),
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    });
+
+    // Wait for SSH check to complete
+    let result = check_task.await.map_err(|e| NydusError::SshError(format!("Task error: {}", e)))?;
+
+    // Give the timer a moment to catch up and display the final time
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Calculate final elapsed time before stopping timer
+    let final_elapsed = start_time.elapsed();
+
+    // Stop the timer task
+    timer_task.abort();
+
+    // Clear line and show final message
+    print!("\r\x1b[2K");
+
+    match result {
+        Ok(_) => {
+            let final_time = format!("{:.1}s", final_elapsed.as_secs_f64());
+            print!("✓ SSH is ready! ");
+            println!("{}", format!("({})", final_time).dimmed());
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
