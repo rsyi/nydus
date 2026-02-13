@@ -16,11 +16,8 @@ pub fn sync_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     print!("⏱  Syncing credentials... ");
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
-    // Install essential tools
-    install_essential_tools(instance)?;
-
-    // Install mise and dev tools (rust, pnpm)
-    install_mise_tools(instance)?;
+    // Install tools based on profile configuration
+    install_tools(instance, profile)?;
 
     // Install Claude Code
     install_claude_code(instance)?;
@@ -29,6 +26,7 @@ pub fn sync_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     if !profile.sync_credentials.git.ssh_keys.is_empty()
         || profile.sync_credentials.git.config
         || profile.sync_credentials.git.gpg_keys
+        || !profile.sync_credentials.git.repositories.is_empty()
     {
         sync_git_credentials(instance, profile)?;
     }
@@ -132,6 +130,11 @@ fn sync_git_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     // Start ssh-agent and add keys
     if !profile.sync_credentials.git.ssh_keys.is_empty() {
         setup_ssh_agent_on_remote(instance, &profile.sync_credentials.git.ssh_keys)?;
+    }
+
+    // Clone repositories
+    if !profile.sync_credentials.git.repositories.is_empty() {
+        clone_repositories(instance, &profile.sync_credentials.git.repositories)?;
     }
 
     Ok(())
@@ -285,7 +288,7 @@ fn sync_dev_configs(instance: &Instance) -> Result<()> {
             .arg("-az")
             .arg("-e")
             .arg(format!("ssh -i {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", ssh_key_path))
-            .arg(format!("{}/.config/nvim/", nvim_config_dir.to_string_lossy()))
+            .arg(format!("{}/", nvim_config_dir.to_string_lossy()))
             .arg(format!("{}@{}:~/.config/nvim/", ssh_user, host))
             .status();
 
@@ -346,10 +349,284 @@ fi
     Ok(())
 }
 
-/// Install essential tools (tmux, nvim, etc.)
-fn install_essential_tools(instance: &Instance) -> Result<()> {
+/// Clone git repositories to home directory
+fn clone_repositories(instance: &Instance, repositories: &[String]) -> Result<()> {
+    println!("    → Cloning repositories...");
+
+    // Add GitHub's host key to known_hosts to avoid host verification failure
+    let add_github_key = "mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null";
+    run_remote_command(instance, add_github_key).ok();
+
+    let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut spin_idx = 0;
+
+    for repo_url in repositories {
+        // Extract repository name from URL (e.g., git@github.com:user/repo.git -> repo)
+        let repo_name = repo_url
+            .split('/')
+            .last()
+            .and_then(|s| s.strip_suffix(".git"))
+            .unwrap_or(repo_url);
+
+        spin_idx = (spin_idx + 1) % spinner.len();
+        print!("      {} Cloning {}... ", spinner[spin_idx].to_string().truecolor(255, 165, 0), repo_name);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        // Check if repository already exists
+        let check_cmd = format!("test -d ~/{}", repo_name);
+        if run_remote_command(instance, &check_cmd).is_ok() {
+            print!("\r\x1b[2K");
+            println!("      {} {} (already exists)", "↓".dimmed(), repo_name.dimmed());
+            continue;
+        }
+
+        // Clone the repository
+        let clone_cmd = format!(
+            "cd ~ && git clone {} 2>&1",
+            repo_url
+        );
+
+        match run_remote_command(instance, &clone_cmd) {
+            Ok(_) => {
+                print!("\r\x1b[2K");
+                println!("      ✓ Cloned {}", repo_name.bright_white());
+            }
+            Err(_) => {
+                print!("\r\x1b[2K");
+                eprintln!("      ⚠ Failed to clone {}", repo_name);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Install all tools based on profile configuration
+fn install_tools(instance: &Instance, profile: &Profile) -> Result<()> {
     let start_time = Instant::now();
-    println!("  → Installing essential tools...");
+    let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut spin_idx = 0;
+
+    // Update apt cache first
+    print!("  {} Updating package lists... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    run_remote_command(instance, "sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1").ok();
+    print!("\r\x1b[2K");
+    println!("  ✓ Package lists updated");
+
+    let mut installed = vec![];
+    let mut failed = vec![];
+
+    // Build list of apt packages to install
+    let mut apt_packages = vec![];
+
+    if profile.tools.presets.essentials {
+        apt_packages.extend_from_slice(&["tmux", "curl", "wget", "git", "unzip"]);
+    }
+    if profile.tools.presets.dev_tools {
+        apt_packages.extend_from_slice(&["htop", "ripgrep", "jq", "tree"]);
+    }
+    apt_packages.extend(profile.tools.custom_apt.iter().map(|s| s.as_str()));
+
+    // Install apt packages individually
+    for package in apt_packages {
+        spin_idx = (spin_idx + 1) % spinner.len();
+        print!("  {} Installing {}... ", spinner[spin_idx].to_string().truecolor(255, 165, 0), package);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let install_cmd = format!("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {} -qq 2>&1", package);
+        match run_remote_command(instance, &install_cmd) {
+            Ok(_) => {
+                print!("\r\x1b[2K");
+                println!("  ✓ Installed {}", package.bright_white());
+                installed.push(package.to_string());
+            }
+            Err(_) => {
+                print!("\r\x1b[2K");
+                eprintln!("  ⚠ Failed to install {}", package);
+                failed.push(package.to_string());
+            }
+        }
+    }
+
+    // Install neovim from official binary if enabled
+    if profile.tools.presets.editors {
+        spin_idx = (spin_idx + 1) % spinner.len();
+        print!("  {} Installing neovim... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let nvim_install = r#"
+curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz 2>&1
+sudo rm -rf /opt/nvim-linux-x86_64
+sudo tar -C /opt -xzf nvim-linux-x86_64.tar.gz
+rm nvim-linux-x86_64.tar.gz
+
+if ! grep -q '/opt/nvim-linux-x86_64/bin' ~/.bashrc 2>/dev/null; then
+    echo 'export PATH="/opt/nvim-linux-x86_64/bin:$PATH"' >> ~/.bashrc
+fi
+
+if [ -f /opt/nvim-linux-x86_64/bin/nvim ]; then
+    echo "SUCCESS"
+else
+    echo "FAILED"
+    exit 1
+fi
+"#;
+
+        match run_remote_command(instance, nvim_install) {
+            Ok(output) if output.contains("SUCCESS") => {
+                print!("\r\x1b[2K");
+                println!("  ✓ Installed {}", "neovim".bright_white());
+                installed.push("neovim".to_string());
+            }
+            _ => {
+                print!("\r\x1b[2K");
+                eprintln!("  ⚠ Failed to install neovim");
+                failed.push("neovim".to_string());
+            }
+        }
+    }
+
+    // Install mise if any language tools are configured
+    let needs_mise = profile.tools.languages.rust.is_some()
+        || profile.tools.languages.node.is_some()
+        || profile.tools.languages.pnpm.is_some()
+        || profile.tools.languages.python.is_some()
+        || profile.tools.languages.go.is_some()
+        || profile.tools.languages.deno.is_some()
+        || !profile.tools.custom_mise.is_empty();
+
+    if needs_mise {
+        spin_idx = (spin_idx + 1) % spinner.len();
+        print!("  {} Installing mise... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mise_install = r#"
+curl https://mise.run | sh
+
+if ! grep -q 'mise activate' ~/.bashrc 2>/dev/null; then
+    echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+fi
+
+eval "$(~/.local/bin/mise activate bash)" || true
+
+if command -v mise >/dev/null 2>&1 || [ -f ~/.local/bin/mise ]; then
+    echo "MISE_OK"
+else
+    echo "MISE_FAILED"
+    exit 1
+fi
+"#;
+
+        match run_remote_command(instance, mise_install) {
+            Ok(output) if output.contains("MISE_OK") => {
+                print!("\r\x1b[2K");
+                println!("  ✓ Installed {}", "mise".bright_white());
+
+                // Install language tools via mise
+                install_mise_languages(instance, profile, &mut spin_idx, &spinner, &mut installed, &mut failed)?;
+            }
+            _ => {
+                print!("\r\x1b[2K");
+                eprintln!("  ⚠ Failed to install mise");
+                failed.push("mise".to_string());
+            }
+        }
+    }
+
+    let final_elapsed = start_time.elapsed();
+    let final_time = format!("{:.1}s", final_elapsed.as_secs_f64());
+
+    println!();
+    if !installed.is_empty() {
+        println!("  {} Installed {} tools {}",
+            "✓".green(),
+            installed.len(),
+            format!("({})", final_time).dimmed()
+        );
+    }
+    if !failed.is_empty() {
+        eprintln!("  {} Failed: {}", "⚠".yellow(), failed.join(", "));
+    }
+
+    Ok(())
+}
+
+/// Install language tools via mise
+fn install_mise_languages(
+    instance: &Instance,
+    profile: &Profile,
+    spin_idx: &mut usize,
+    spinner: &[char; 10],
+    installed: &mut Vec<String>,
+    failed: &mut Vec<String>,
+) -> Result<()> {
+    // Build list of tools to install
+    let mut tools = vec![];
+
+    if let Some(rust) = &profile.tools.languages.rust {
+        if *rust { tools.push(("rust", "rust".to_string())); }
+    }
+    if let Some(node) = &profile.tools.languages.node {
+        tools.push(("node", format!("node@{}", node)));
+    }
+    if let Some(pnpm) = &profile.tools.languages.pnpm {
+        if *pnpm { tools.push(("pnpm", "pnpm".to_string())); }
+    }
+    if let Some(python) = &profile.tools.languages.python {
+        tools.push(("python", format!("python@{}", python)));
+    }
+    if let Some(go_ver) = &profile.tools.languages.go {
+        tools.push(("go", format!("go@{}", go_ver)));
+    }
+    if let Some(deno) = &profile.tools.languages.deno {
+        if *deno { tools.push(("deno", "deno".to_string())); }
+    }
+
+    // Add custom mise tools
+    for tool in &profile.tools.custom_mise {
+        tools.push((tool.as_str(), tool.clone()));
+    }
+
+    // Install each tool
+    for (display_name, tool_spec) in tools {
+        *spin_idx = (*spin_idx + 1) % spinner.len();
+        print!("  {} Installing {}... ", spinner[*spin_idx].to_string().truecolor(255, 165, 0), display_name);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let install_cmd = format!(
+            "eval \"$(~/.local/bin/mise activate bash)\" && ~/.local/bin/mise install {} && ~/.local/bin/mise use -g {}",
+            tool_spec, tool_spec
+        );
+
+        match run_remote_command(instance, &install_cmd) {
+            Ok(_) => {
+                print!("\r\x1b[2K");
+                println!("  ✓ Installed {}", display_name.bright_white());
+                installed.push(display_name.to_string());
+            }
+            Err(_) => {
+                print!("\r\x1b[2K");
+                eprintln!("  ⚠ Failed to install {}", display_name);
+                failed.push(display_name.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Old function - kept for reference, now replaced by install_tools
+#[allow(dead_code)]
+fn install_essential_tools_old(instance: &Instance) -> Result<()> {
+    let start_time = Instant::now();
+
+    // Spinner characters
+    let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut spin_idx = 0;
+
+    print!("  {} Installing essential tools... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+    std::io::Write::flush(&mut std::io::stdout()).ok();
 
     // Update package lists
     let update_script = "sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1";
@@ -368,6 +645,10 @@ fn install_essential_tools(instance: &Instance) -> Result<()> {
     let mut failed = vec![];
 
     for (name, package) in packages {
+        spin_idx = (spin_idx + 1) % spinner.len();
+        print!("\r  {} Installing essential tools... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
         let install_cmd = format!("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {} -qq 2>&1", package);
         match run_remote_command(instance, &install_cmd) {
             Ok(_) => installed.push(name),
@@ -376,6 +657,10 @@ fn install_essential_tools(instance: &Instance) -> Result<()> {
     }
 
     // Install neovim from official binary
+    spin_idx = (spin_idx + 1) % spinner.len();
+    print!("\r  {} Installing essential tools... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
     let nvim_install = r#"
 curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz 2>&1
 sudo rm -rf /opt/nvim-linux-x86_64
@@ -408,21 +693,31 @@ fi
     let final_elapsed = start_time.elapsed();
     let final_time = format!("{:.1}s", final_elapsed.as_secs_f64());
 
+    // Clear the spinner line
+    print!("\r\x1b[2K");
+
     if !installed.is_empty() {
-        print!("    ✓ Installed: {} ", installed.join(", "));
+        print!("  ✓ Installed: {} ", installed.join(", "));
         println!("{}", format!("({})", final_time).dimmed());
     }
     if !failed.is_empty() {
-        eprintln!("    ⚠ Failed: {}", failed.join(", "));
+        eprintln!("  ⚠ Failed: {}", failed.join(", "));
     }
 
     Ok(())
 }
 
-/// Install mise and dev tools (rust, pnpm)
-fn install_mise_tools(instance: &Instance) -> Result<()> {
+/// Old function - kept for reference, now replaced by install_tools
+#[allow(dead_code)]
+fn install_mise_tools_old(instance: &Instance) -> Result<()> {
     let start_time = Instant::now();
-    println!("  → Installing mise & dev tools...");
+
+    // Spinner characters
+    let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut spin_idx = 0;
+
+    print!("  {} Installing mise & dev tools... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+    std::io::Write::flush(&mut std::io::stdout()).ok();
 
     // Install mise
     let mise_install = r#"
@@ -458,6 +753,10 @@ fi
             ];
 
             for (name, tool) in tools {
+                spin_idx = (spin_idx + 1) % spinner.len();
+                print!("\r  {} Installing mise & dev tools... ", spinner[spin_idx].to_string().truecolor(255, 165, 0));
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+
                 let install_cmd = format!(
                     "eval \"$(~/.local/bin/mise activate bash)\" && ~/.local/bin/mise install {} && ~/.local/bin/mise use -g {}",
                     tool, tool
@@ -476,12 +775,15 @@ fi
     let final_elapsed = start_time.elapsed();
     let final_time = format!("{:.1}s", final_elapsed.as_secs_f64());
 
+    // Clear the spinner line
+    print!("\r\x1b[2K");
+
     if !installed.is_empty() {
-        print!("    ✓ Installed via mise: {} ", installed.join(", "));
+        print!("  ✓ Installed via mise: {} ", installed.join(", "));
         println!("{}", format!("({})", final_time).dimmed());
     }
     if !failed.is_empty() {
-        eprintln!("    ⚠ Failed: {}", failed.join(", "));
+        eprintln!("  ⚠ Failed: {}", failed.join(", "));
     }
 
     Ok(())
@@ -522,7 +824,7 @@ fi
                 println!("{}", "    ⚠ Installation uncertain".yellow());
             }
         }
-        Err(e) => {
+        Err(_) => {
             println!("{}", "    ⚠ Claude Code installation failed".yellow());
             println!("    Install manually after connecting:");
             println!("    {}", "curl -fsSL https://claude.ai/install.sh | bash".bright_white());

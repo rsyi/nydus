@@ -19,6 +19,7 @@ pub fn attach(instance: &Instance) -> Result<()> {
     let tmux_command = "if tmux ls &>/dev/null; then tmux a; else tmux; fi";
 
     let status = Command::new("ssh")
+        .arg("-A")  // Enable SSH agent forwarding
         .arg("-i")
         .arg(ssh_key_path)
         .arg("-o")
@@ -218,6 +219,7 @@ pub fn run_remote_command(instance: &Instance, command: &str) -> Result<String> 
         .ok_or_else(|| NydusError::SshError("Instance has no public IP or DNS".to_string()))?;
 
     let output = Command::new("ssh")
+        .arg("-A")  // Enable SSH agent forwarding
         .arg("-i")
         .arg(ssh_key_path)
         .arg("-o")

@@ -61,6 +61,12 @@ pub enum Commands {
         no_refresh: bool,
     },
 
+    /// Show detailed instance status with tmux sessions and running processes
+    Status {
+        /// Instance name (uses current context if not specified)
+        name: Option<String>,
+    },
+
     /// Refresh instance status from AWS
     Refresh {
         /// Instance name (refresh all if not specified)
@@ -199,7 +205,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("{}", "Initializing nydus...".cyan());
             crate::config::init_nydus_dir()?;
             println!("{}", "✓ Created ~/.nydus/ directory".green());
-            println!("{}", "✓ Created config.yaml".green());
+            println!("{}", "✓ Created config.yml".green());
             println!("{}", "✓ Created state.sqlite database".green());
             Ok(())
         }
@@ -221,6 +227,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Commands::Ls { no_refresh }) => {
             cmd_ls(!no_refresh).await
+        }
+        Some(Commands::Status { name }) => {
+            cmd_status(name.as_deref()).await
         }
         Some(Commands::Refresh { name }) => {
             cmd_refresh(name.as_deref()).await
@@ -536,6 +545,184 @@ async fn cmd_ls(refresh: bool) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_status(name: Option<&str>) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    let instance_name = if let Some(name) = name {
+        name.to_string()
+    } else {
+        db.get_current_context()?
+            .ok_or_else(|| anyhow::anyhow!("No current context. Specify instance name."))?
+    };
+
+    let instance = db.get_instance(&instance_name)?;
+
+    // Refresh instance status
+    let instance = crate::aws::ec2::refresh_instance(&instance).await?;
+    let status = instance.status.as_deref().unwrap_or("unknown");
+
+    // Print header
+    println!();
+    println!("{} {}", "Instance:".bright_white().bold(), instance.name.bright_cyan().bold());
+
+    let status_lower = status.to_lowercase();
+    let is_running = status_lower.contains("running");
+
+    println!("{} {} ({})",
+        "Status:  ".bright_white(),
+        if is_running { "● running".green() } else { "○ stopped".yellow() },
+        instance.public_ip.as_deref().unwrap_or("no IP").bright_white()
+    );
+
+    if !is_running {
+        println!();
+        println!("{}", "Instance is not running. Start it with:".yellow());
+        println!("  {}", format!("nydus start {}", instance.name).bright_white().bold());
+        println!();
+        return Ok(());
+    }
+
+    // Get tmux state
+    let tmux_output = match crate::ssh::run_remote_command(&instance,
+        "tmux list-panes -a -F '#{session_name}|#{session_attached}|#{window_index}|#{window_name}|#{window_active}|#{pane_index}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || echo 'NO_TMUX'"
+    ) {
+        Ok(output) => output,
+        Err(_) => {
+            println!();
+            println!("{}", "Could not query tmux state".yellow());
+            return Ok(());
+        }
+    };
+
+    if tmux_output.trim() == "NO_TMUX" {
+        println!();
+        println!("{}", "No tmux sessions found".dimmed());
+    } else {
+        display_tmux_tree(&tmux_output)?;
+    }
+
+    // Get running processes
+    let claude_check = crate::ssh::run_remote_command(&instance,
+        "pgrep -f claude > /dev/null && echo 'RUNNING' || echo 'NOT_RUNNING'"
+    ).unwrap_or_default();
+
+    println!();
+    println!("{}", "Processes:".bright_white().bold());
+    if claude_check.trim() == "RUNNING" {
+        println!("  {} Claude Code", "●".green());
+    } else {
+        println!("  {} Claude Code", "○".dimmed());
+    }
+
+    // Get system info
+    let uptime = crate::ssh::run_remote_command(&instance, "uptime -p").unwrap_or_default();
+    println!();
+    println!("{} {}", "Uptime:".bright_white(), uptime.trim().dimmed());
+
+    println!();
+
+    Ok(())
+}
+
+fn display_tmux_tree(output: &str) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct TmuxSession {
+        attached: bool,
+        windows: BTreeMap<usize, TmuxWindow>,
+    }
+
+    #[derive(Default)]
+    struct TmuxWindow {
+        name: String,
+        active: bool,
+        panes: BTreeMap<usize, TmuxPane>,
+    }
+
+    struct TmuxPane {
+        command: String,
+        path: String,
+    }
+
+    let mut sessions: BTreeMap<String, TmuxSession> = BTreeMap::new();
+
+    // Parse tmux output
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 8 {
+            continue;
+        }
+
+        let session_name = parts[0].to_string();
+        let session_attached = parts[1] == "1";
+        let window_index: usize = parts[2].parse().unwrap_or(0);
+        let window_name = parts[3].to_string();
+        let window_active = parts[4] == "1";
+        let pane_index: usize = parts[5].parse().unwrap_or(0);
+        let pane_command = parts[6].to_string();
+        let pane_path = parts[7].to_string();
+
+        let session = sessions.entry(session_name).or_default();
+        session.attached = session_attached;
+
+        let window = session.windows.entry(window_index).or_default();
+        window.name = window_name;
+        window.active = window_active;
+
+        window.panes.insert(pane_index, TmuxPane {
+            command: pane_command,
+            path: pane_path,
+        });
+    }
+
+    // Display tree
+    println!();
+    println!("{} ({})", "📺 Tmux Sessions".bright_white().bold(), sessions.len());
+    println!();
+
+    for (session_name, session) in sessions.iter() {
+        let attached_str = if session.attached { "[attached]".green() } else { "[detached]".dimmed() };
+        println!("  {} {}", format!("Session: {}", session_name).bright_cyan(), attached_str);
+
+        let window_count = session.windows.len();
+        for (win_idx, (window_index, window)) in session.windows.iter().enumerate() {
+            let is_last_window = win_idx == window_count - 1;
+            let window_prefix = if is_last_window { "└─" } else { "├─" };
+            let pane_prefix = if is_last_window { "   " } else { "│  " };
+
+            let active_marker = if window.active { " ●".green() } else { "".normal() };
+            println!("    {} Window {}: {}{}",
+                window_prefix.dimmed(),
+                window_index.to_string().bright_white(),
+                window.name.bright_cyan().bold(),
+                active_marker
+            );
+
+            let pane_count = window.panes.len();
+            for (pane_idx, (pane_index, pane)) in window.panes.iter().enumerate() {
+                let is_last_pane = pane_idx == pane_count - 1;
+                let pane_branch = if is_last_pane { "└─" } else { "├─" };
+
+                // Shorten path
+                let short_path = pane.path.replace(&std::env::var("HOME").unwrap_or_default(), "~");
+
+                println!("    {}  {} Pane {}: {:<15} {}",
+                    pane_prefix.dimmed(),
+                    pane_branch.dimmed(),
+                    pane_index,
+                    pane.command.dimmed(),
+                    short_path.dimmed()
+                );
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 async fn cmd_import(
     instance_id: &str,
     name: &str,
@@ -827,7 +1014,7 @@ async fn cmd_profile(cmd: ProfileCommands) -> Result<()> {
             config.upsert_profile(new_profile);
             config.save()?;
             println!("{} {}", "✓ Added profile:".green(), name.bright_white());
-            println!("  Edit ~/.nydus/config.yaml to configure");
+            println!("  Edit ~/.nydus/config.yml to configure");
         }
     }
     Ok(())

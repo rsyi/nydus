@@ -353,7 +353,6 @@ async fn wait_for_instance_running(client: &Client, instance_id: &str) -> Result
 /// Wait for SSH to be ready on the instance
 async fn wait_for_ssh_ready(instance: &Instance) -> Result<()> {
     use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     let max_duration = tokio::time::Duration::from_secs(60);
     let start_time = Arc::new(Instant::now());

@@ -10,9 +10,9 @@ pub fn nydus_dir() -> Result<PathBuf> {
     Ok(home.join(".nydus"))
 }
 
-/// Get the config file path (~/.nydus/config.yaml)
+/// Get the config file path (~/.nydus/config.yml)
 pub fn config_path() -> Result<PathBuf> {
-    Ok(nydus_dir()?.join("config.yaml"))
+    Ok(nydus_dir()?.join("config.yml"))
 }
 
 /// Get the state database path (~/.nydus/state.sqlite)
@@ -110,6 +110,8 @@ pub struct Profile {
     pub tags: HashMap<String, String>,
     #[serde(default)]
     pub sync_credentials: SyncCredentials,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 impl Default for Profile {
@@ -136,9 +138,10 @@ impl Default for Profile {
             sync_credentials: SyncCredentials {
                 enabled: true,
                 git: GitSync {
-                    ssh_keys: vec!["~/.ssh/id_ed25519".to_string()],
+                    ssh_keys: vec![],  // Don't sync keys - use agent forwarding instead!
                     config: true,
                     gpg_keys: false,
+                    repositories: vec![],
                 },
                 claude: ClaudeSync {
                     enabled: true,
@@ -151,6 +154,7 @@ impl Default for Profile {
                 env_vars,
                 dotfiles: vec!["~/.vimrc".to_string()],
             },
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -179,6 +183,8 @@ pub struct GitSync {
     pub config: bool,
     #[serde(default)]
     pub gpg_keys: bool,
+    #[serde(default)]
+    pub repositories: Vec<String>,  // Git repos to clone (e.g., git@github.com:user/repo.git)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -193,6 +199,60 @@ pub struct ClaudeSync {
 pub struct AwsSync {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub presets: ToolPresets,
+    #[serde(default)]
+    pub languages: LanguagesConfig,
+    #[serde(default)]
+    pub custom_apt: Vec<String>,
+    #[serde(default)]
+    pub custom_mise: Vec<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        ToolsConfig {
+            presets: ToolPresets {
+                essentials: true,
+                dev_tools: true,
+                editors: true,
+            },
+            languages: LanguagesConfig {
+                rust: Some(true),
+                node: Some("20".to_string()),
+                pnpm: Some(true),
+                python: None,
+                go: None,
+                deno: None,
+            },
+            custom_apt: vec![],
+            custom_mise: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolPresets {
+    #[serde(default)]
+    pub essentials: bool,  // tmux, curl, wget, git, unzip
+    #[serde(default)]
+    pub dev_tools: bool,   // htop, ripgrep, jq, tree
+    #[serde(default)]
+    pub editors: bool,     // neovim (from official binary)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LanguagesConfig {
+    pub rust: Option<bool>,
+    pub node: Option<String>,  // Version or "true" for latest
+    pub pnpm: Option<bool>,
+    pub python: Option<String>,
+    pub go: Option<String>,
+    pub deno: Option<bool>,
 }
 
 /// Instance represents an EC2 instance tracked by nydus
