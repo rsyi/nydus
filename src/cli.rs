@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use colored::*;
 
 #[derive(Parser)]
 #[command(name = "nydus")]
@@ -22,8 +23,8 @@ pub enum Commands {
         /// Name for the instance
         name: String,
 
-        /// Profile to use
-        #[arg(short, long)]
+        /// Profile to use (defaults to "default")
+        #[arg(short, long, default_value = "default")]
         profile: String,
 
         /// Skip credential sync
@@ -31,14 +32,43 @@ pub enum Commands {
         no_sync: bool,
     },
 
-    /// Stop a running instance
+    /// Terminate and destroy an instance
     Down {
+        /// Instance name (uses current context if not specified)
+        name: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Stop a running instance (can be restarted)
+    Stop {
         /// Instance name (uses current context if not specified)
         name: Option<String>,
     },
 
-    /// Terminate an instance
-    Terminate {
+    /// Start a stopped instance
+    Start {
+        /// Instance name (uses current context if not specified)
+        name: Option<String>,
+    },
+
+    /// List all instances
+    Ls {
+        /// Skip refreshing status from AWS (faster but may be stale)
+        #[arg(long)]
+        no_refresh: bool,
+    },
+
+    /// Refresh instance status from AWS
+    Refresh {
+        /// Instance name (refresh all if not specified)
+        name: Option<String>,
+    },
+
+    /// Remove instance from local state (doesn't touch AWS)
+    Forget {
         /// Instance name
         name: String,
 
@@ -46,9 +76,6 @@ pub enum Commands {
         #[arg(short, long)]
         yes: bool,
     },
-
-    /// List all instances
-    Ls,
 
     /// Import an existing EC2 instance
     Import {
@@ -169,11 +196,11 @@ pub enum ProfileCommands {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Commands::Init) => {
-            println!("Initializing nydus...");
+            println!("{}", "Initializing nydus...".cyan());
             crate::config::init_nydus_dir()?;
-            println!("✓ Created ~/.nydus/ directory");
-            println!("✓ Created config.yaml");
-            println!("✓ Created state.sqlite database");
+            println!("{}", "✓ Created ~/.nydus/ directory".green());
+            println!("{}", "✓ Created config.yaml".green());
+            println!("{}", "✓ Created state.sqlite database".green());
             Ok(())
         }
         Some(Commands::Tui) | None => {
@@ -183,14 +210,23 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Commands::Up { name, profile, no_sync }) => {
             cmd_up(&name, &profile, !no_sync).await
         }
-        Some(Commands::Down { name }) => {
-            cmd_down(name.as_deref()).await
+        Some(Commands::Down { name, yes }) => {
+            cmd_down(name.as_deref(), yes).await
         }
-        Some(Commands::Terminate { name, yes }) => {
-            cmd_terminate(&name, yes).await
+        Some(Commands::Stop { name }) => {
+            cmd_stop(name.as_deref()).await
         }
-        Some(Commands::Ls) => {
-            cmd_ls().await
+        Some(Commands::Start { name }) => {
+            cmd_start(name.as_deref()).await
+        }
+        Some(Commands::Ls { no_refresh }) => {
+            cmd_ls(!no_refresh).await
+        }
+        Some(Commands::Refresh { name }) => {
+            cmd_refresh(name.as_deref()).await
+        }
+        Some(Commands::Forget { name, yes }) => {
+            cmd_forget(&name, yes).await
         }
         Some(Commands::Import { instance_id, name, region, ssh_user, key, profile }) => {
             cmd_import(&instance_id, &name, &region, &ssh_user, &key, &profile).await
@@ -230,14 +266,47 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
     let config = crate::config::Config::load()?;
     let profile = config.get_profile(profile_name)?;
 
-    println!("Creating instance '{}' with profile '{}'...", name, profile_name);
+    // Check if instance name already exists in local state
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    if let Ok(existing) = db.get_instance(name) {
+        let status = existing.status.as_deref().unwrap_or("unknown").to_lowercase();
+
+        eprintln!("{}", format!("✗ Instance '{}' already exists.", name).red().bold());
+        eprintln!();
+
+        if status.contains("stop") {
+            eprintln!("{}", "Instance is stopped. To restart it:".yellow());
+            eprintln!("  {} {}", "→".green(), format!("nydus start {}", name).bright_white().bold());
+        } else if status.contains("running") {
+            eprintln!("{}", "Instance is running.".yellow());
+            eprintln!("  {} {}", "→".green(), format!("nydus attach {}", name).bright_white());
+        } else {
+            eprintln!("{}", "Available options:".yellow());
+            eprintln!("  {} {}", "•".yellow(), format!("View:      nydus ls").bright_white());
+            eprintln!("  {} {}", "•".yellow(), format!("Refresh:   nydus refresh {}", name).bright_white());
+        }
+
+        eprintln!();
+        eprintln!("  {} {}", "Remove:".dimmed(), format!("nydus terminate {} --yes", name).dimmed());
+        eprintln!();
+        eprintln!("{}", format!("Status: {} ({})",
+            existing.status.as_deref().unwrap_or("unknown"),
+            existing.instance_id
+        ).dimmed());
+
+        return Err(anyhow::anyhow!("Instance already exists"));
+    }
+
+    println!("{}", format!("Creating instance '{}' with profile '{}'...", name, profile_name).cyan());
 
     // Create EC2 instance
     let instance = crate::aws::ec2::run_instance(profile, name).await?;
 
-    println!("✓ Instance created: {}", instance.instance_id);
+    println!("{} {}", "✓ Instance created:".green().bold(), instance.instance_id.bright_white());
     if let Some(ip) = &instance.public_ip {
-        println!("✓ Public IP: {}", ip);
+        println!("{} {}", "✓ Public IP:".green().bold(), ip.bright_white());
     }
 
     // Save to state database
@@ -246,10 +315,11 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
     db.upsert_instance(&instance)?;
     db.set_current_context(Some(name))?;
 
-    println!("✓ Saved to local state");
+    println!("{}", "✓ Saved to local state".green().bold());
 
     // Sync credentials if enabled
     if sync && profile.sync_credentials.enabled {
+        println!();
         crate::sync::sync_credentials(&instance, profile)?;
 
         // Update last_synced timestamp
@@ -258,13 +328,63 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
         db.upsert_instance(&updated)?;
     }
 
-    println!("\n✓ Instance ready: {} ({})", name, instance.public_ip.unwrap_or_default());
-    println!("  Connect with: nydus attach {}", name);
+    println!();
+    println!("{} {} {}",
+        "🚀".normal(),
+        name.bright_white().bold(),
+        "is ready!".green().bold()
+    );
+    println!("   {} {}", "IP:".dimmed(), instance.public_ip.unwrap_or_default().bright_cyan());
+    println!();
+    println!("   {} {}", "Connect:".bright_white(), format!("nydus attach {}", name).truecolor(255, 165, 0).bold());
 
     Ok(())
 }
 
-async fn cmd_down(name: Option<&str>) -> Result<()> {
+async fn cmd_down(name: Option<&str>, yes: bool) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    let instance_name = if let Some(name) = name {
+        name.to_string()
+    } else {
+        db.get_current_context()?
+            .ok_or_else(|| anyhow::anyhow!("No current context. Specify instance name."))?
+    };
+
+    if !yes {
+        println!("{}", format!("This will permanently terminate instance '{}'.", instance_name).yellow());
+        print!("Are you sure? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let instance = db.get_instance(&instance_name)?;
+
+    println!("{}", format!("Terminating instance '{}'...", instance_name).cyan());
+    crate::aws::ec2::terminate_instance(&instance).await?;
+
+    // Remove from state
+    db.delete_instance(&instance_name)?;
+
+    // Clear context if this was the current instance
+    if let Some(current) = db.get_current_context()? {
+        if current == instance_name {
+            db.set_current_context(None)?;
+        }
+    }
+
+    println!("{}", "✓ Instance terminated and removed from state".green());
+
+    Ok(())
+}
+
+async fn cmd_stop(name: Option<&str>) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -277,7 +397,7 @@ async fn cmd_down(name: Option<&str>) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    println!("Stopping instance '{}'...", instance_name);
+    println!("{}", format!("Stopping instance '{}'...", instance_name).cyan());
     crate::aws::ec2::stop_instance(&instance).await?;
 
     // Update state
@@ -286,7 +406,34 @@ async fn cmd_down(name: Option<&str>) -> Result<()> {
     updated.status = Some("stopping".to_string());
     db.upsert_instance(&updated)?;
 
-    println!("✓ Instance stopped");
+    println!("{}", "✓ Instance stopped (use 'nydus start' to restart)".green());
+
+    Ok(())
+}
+
+async fn cmd_start(name: Option<&str>) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    let instance_name = if let Some(name) = name {
+        name.to_string()
+    } else {
+        db.get_current_context()?
+            .ok_or_else(|| anyhow::anyhow!("No current context. Specify instance name."))?
+    };
+
+    let instance = db.get_instance(&instance_name)?;
+
+    println!("{}", format!("Starting instance '{}'...", instance_name).cyan());
+    crate::aws::ec2::start_instance(&instance).await?;
+
+    // Refresh and update state
+    let updated = crate::aws::ec2::refresh_instance(&instance).await?;
+    db.upsert_instance(&updated)?;
+    db.set_current_context(Some(&instance_name))?;
+
+    println!("{} {}", "✓ Instance started:".green(), updated.public_ip.unwrap_or_default().bright_white());
+    println!("  {} {}", "Connect with:".yellow(), format!("nydus attach {}", instance_name).bright_white());
 
     Ok(())
 }
@@ -325,39 +472,65 @@ async fn cmd_terminate(name: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_ls() -> Result<()> {
+async fn cmd_ls(refresh: bool) -> Result<()> {
+    if refresh {
+        println!("{}", "Refreshing instance status from AWS...".cyan());
+        cmd_refresh(None).await?;
+        println!();
+    }
+
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
     let instances = db.list_instances()?;
 
     if instances.is_empty() {
-        println!("No instances found.");
-        println!("Create one with: nydus up <name> --profile <profile>");
+        println!("{}", "No instances found.".yellow());
+        println!("{} {}", "Create one with:".dimmed(), "nydus up <name>".bright_white());
         return Ok(());
     }
 
     let current_context = db.get_current_context()?;
 
-    println!("\n{:<20} {:<15} {:<20} {:<15} {:<12}", "NAME", "STATUS", "INSTANCE ID", "PUBLIC IP", "REGION");
-    println!("{}", "-".repeat(85));
+    println!();
+    println!("{:<20} {:<15} {:<20} {:<15} {:<12}",
+        "NAME".bright_white().bold(),
+        "STATUS".bright_white().bold(),
+        "INSTANCE ID".bright_white().bold(),
+        "PUBLIC IP".bright_white().bold(),
+        "REGION".bright_white().bold()
+    );
+    println!("{}", "-".repeat(85).dimmed());
 
     for instance in instances {
         let is_current = current_context.as_ref().map_or(false, |c| c == &instance.name);
-        let marker = if is_current { "*" } else { " " };
+        let marker = if is_current { "→".green() } else { " ".normal() };
+
+        let status = instance.status.as_deref().unwrap_or("unknown");
+        let status_colored = match status {
+            s if s.contains("running") => s.green(),
+            s if s.contains("stopped") => s.yellow(),
+            s if s.contains("terminated") => s.red(),
+            s if s.contains("stopping") || s.contains("pending") => s.cyan(),
+            s => s.normal(),
+        };
 
         println!(
-            "{}{:<19} {:<15} {:<20} {:<15} {:<12}",
+            "{} {:<19} {:<15} {:<20} {:<15} {:<12}",
             marker,
-            instance.name,
-            instance.status.as_deref().unwrap_or("unknown"),
-            instance.instance_id,
-            instance.public_ip.as_deref().unwrap_or("-"),
-            instance.region
+            if is_current { instance.name.bright_cyan().bold().to_string() } else { instance.name.to_string() },
+            status_colored,
+            instance.instance_id.dimmed(),
+            instance.public_ip.as_deref().unwrap_or("-").bright_white(),
+            instance.region.dimmed()
         );
     }
 
     if let Some(current) = current_context {
-        println!("\n* Current context: {}", current);
+        println!();
+        println!("{} {}",
+            "→ Current context:".green(),
+            current.bright_cyan().bold()
+        );
     }
 
     Ok(())
@@ -653,9 +826,119 @@ async fn cmd_profile(cmd: ProfileCommands) -> Result<()> {
             };
             config.upsert_profile(new_profile);
             config.save()?;
-            println!("✓ Added profile: {}", name);
+            println!("{} {}", "✓ Added profile:".green(), name.bright_white());
             println!("  Edit ~/.nydus/config.yaml to configure");
         }
     }
+    Ok(())
+}
+
+async fn cmd_refresh(name: Option<&str>) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    let instances = if let Some(name) = name {
+        vec![db.get_instance(name)?]
+    } else {
+        db.list_instances()?
+    };
+
+    if instances.is_empty() {
+        println!("{}", "No instances to refresh.".yellow());
+        return Ok(());
+    }
+
+    for instance in instances {
+        print!("{} {}... ", "Refreshing".cyan(), instance.name.bright_white());
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        match crate::aws::ec2::refresh_instance(&instance).await {
+            Ok(updated) => {
+                let status = updated.status.as_deref().unwrap_or("unknown");
+
+                // Auto-remove terminated instances
+                if status.contains("terminated") {
+                    db.delete_instance(&instance.name)?;
+
+                    // Clear context if this was the current instance
+                    if let Some(current) = db.get_current_context()? {
+                        if current == instance.name {
+                            db.set_current_context(None)?;
+                        }
+                    }
+
+                    println!("{}", "terminated (removed)".red().dimmed());
+                } else {
+                    db.upsert_instance(&updated)?;
+                    let status_colored = match status {
+                        s if s.contains("running") => s.green(),
+                        s if s.contains("stopped") => s.yellow(),
+                        s => s.normal(),
+                    };
+                    println!("{}", status_colored);
+                }
+            }
+            Err(e) => {
+                // Check if it's an InstanceNotFound error - instance was terminated and removed from AWS
+                let err_msg = format!("{}", e);
+                if err_msg.contains("InstanceNotFound") || err_msg.contains("Instance not found") {
+                    // Instance not found in AWS - remove from local state
+                    db.delete_instance(&instance.name)?;
+
+                    // Clear context if this was the current instance
+                    if let Some(current) = db.get_current_context()? {
+                        if current == instance.name {
+                            db.set_current_context(None)?;
+                        }
+                    }
+
+                    println!("{}", "not found in AWS (removed)".red().dimmed());
+                } else {
+                    println!("{}", format!("error: {}", e).red());
+                    println!("{} {}", "  Consider running:".yellow(), format!("nydus forget {}", instance.name).bright_white());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_forget(name: &str, yes: bool) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    // Check if instance exists
+    let instance = db.get_instance(name)?;
+
+    if !yes {
+        println!("{}", format!("Remove '{}' from local state?", name).yellow());
+        println!("{}", "  This will NOT terminate the EC2 instance if it still exists.".dimmed());
+        println!("  {}{}", "Instance ID: ".dimmed(), instance.instance_id);
+        println!();
+        print!("{}", "Continue? (y/N): ".bright_white());
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", "Aborted.".yellow());
+            return Ok(());
+        }
+    }
+
+    // Remove from state
+    db.delete_instance(name)?;
+
+    // Clear context if this was the current instance
+    if let Some(current) = db.get_current_context()? {
+        if current == name {
+            db.set_current_context(None)?;
+        }
+    }
+
+    println!("{} {}", "✓ Removed from local state:".green(), name.bright_white());
+    println!("{}", "  Note: EC2 instance may still exist in AWS".dimmed());
+
     Ok(())
 }
