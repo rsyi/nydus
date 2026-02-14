@@ -13,7 +13,16 @@ A local-first Rust CLI + TUI tool for managing EC2 dev environments with built-i
 
 ## Installation
 
-### Option 1: Download Prebuilt Binary (Recommended)
+### Quick Install (Recommended)
+
+**One-line install for all platforms:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/oxy-hq/nydus/main/install.sh | bash
+```
+
+This will automatically detect your platform and install the latest version.
+
+### Option 1: Download Prebuilt Binary
 
 **Linux x86_64:**
 ```bash
