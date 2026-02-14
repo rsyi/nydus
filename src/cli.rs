@@ -4,6 +4,7 @@ use colored::*;
 
 #[derive(Parser)]
 #[command(name = "nydus")]
+#[command(version)]
 #[command(about = "Local-first EC2 instance manager for remote dev environments", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -809,49 +810,37 @@ async fn cmd_attach(name: Option<&str>) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    // Try to attach
-    match crate::ssh::attach(&instance) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            // Check if it's a connection error (could be wrong IP)
-            let error_msg = e.to_string();
-            if error_msg.contains("Connection") || error_msg.contains("timed out") || error_msg.contains("refused") {
-                println!();
-                println!("{}", "SSH connection failed!".yellow());
-                println!("This might be because your IP address has changed.");
-                println!();
+    // Proactively check if current IP is allowed
+    let my_ip = crate::aws::ec2::get_my_public_ip().await?;
+    let ip_allowed = crate::aws::ec2::check_ip_allowed(&instance.region, &instance.instance_id, &my_ip).await?;
 
-                use std::io::{self, Write};
-                print!("{} ", "Update security group to allow your current IP? [Y/n]:".bright_white());
-                io::stdout().flush()?;
+    if !ip_allowed {
+        println!();
+        println!("{}", "Your current IP is not allowed in the security group!".yellow());
+        println!("Current IP: {}", my_ip.bright_cyan());
+        println!();
 
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
+        use std::io::{self, Write};
+        print!("{} ", "Update security group to allow your current IP? [Y/n]:".bright_white());
+        io::stdout().flush()?;
 
-                if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
-                    println!();
-                    // Get current IP
-                    let my_ip = crate::aws::ec2::get_my_public_ip().await?;
-                    println!("Current IP: {}", my_ip.bright_cyan());
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
 
-                    // Update security group
-                    println!("{} Updating security group...", "→".bright_white());
-                    crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
-                    println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
-                    println!();
-
-                    // Retry attach
-                    println!("{} Retrying connection...", "→".bright_white());
-                    crate::ssh::attach(&instance)?;
-                    Ok(())
-                } else {
-                    Err(e.into())
-                }
-            } else {
-                Err(e.into())
-            }
+        if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
+            println!();
+            println!("{} Updating security group...", "→".bright_white());
+            crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
+            println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
+            println!();
+        } else {
+            return Err(anyhow::anyhow!("Cannot connect - IP not allowed"));
         }
     }
+
+    // Now attach
+    crate::ssh::attach(&instance)?;
+    Ok(())
 }
 
 async fn cmd_forward(

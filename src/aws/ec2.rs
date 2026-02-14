@@ -630,6 +630,64 @@ async fn discover_nydus_instances_in_region(region: &str) -> Result<Vec<Instance
     Ok(instances)
 }
 
+/// Check if an IP is allowed in the instance's security group
+pub async fn check_ip_allowed(region: &str, instance_id: &str, ip: &str) -> Result<bool> {
+    let client = initialize_ec2_client(region).await?;
+
+    // Get the instance to find its security group
+    let describe_instances = client
+        .describe_instances()
+        .instance_ids(instance_id)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to describe instance: {:?}", e)))?;
+
+    let instance = describe_instances
+        .reservations()
+        .first()
+        .and_then(|r| r.instances().first())
+        .ok_or_else(|| NydusError::AwsError("Instance not found".to_string()))?;
+
+    // Get the first security group from the instance
+    let sg_id = instance
+        .security_groups()
+        .first()
+        .and_then(|sg| sg.group_id())
+        .ok_or_else(|| NydusError::AwsError("Instance has no security group".to_string()))?;
+
+    // Get security group details
+    let describe_result = client
+        .describe_security_groups()
+        .group_ids(sg_id)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to describe security group: {:?}", e)))?;
+
+    let security_group = describe_result
+        .security_groups()
+        .first()
+        .ok_or_else(|| NydusError::AwsError("Security group not found".to_string()))?;
+
+    // Check if IP is allowed for SSH (port 22)
+    let ip_with_cidr = format!("{}/32", ip);
+    for permission in security_group.ip_permissions() {
+        if let Some(port) = permission.from_port() {
+            if port == 22 {
+                // Check if our IP is in the allowed ranges
+                for ip_range in permission.ip_ranges() {
+                    if let Some(cidr) = ip_range.cidr_ip() {
+                        if cidr == ip_with_cidr || cidr == "0.0.0.0/0" {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 /// Update security group to allow SSH from a new IP address
 pub async fn update_security_group_ip(region: &str, instance_id: &str, new_ip: &str) -> Result<()> {
     let client = initialize_ec2_client(region).await?;
