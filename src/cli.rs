@@ -164,6 +164,23 @@ pub enum Commands {
         name: Option<String>,
     },
 
+    /// Sync local state from AWS (discover nydus-managed instances)
+    SyncState {
+        /// AWS regions to query (defaults to profile regions)
+        #[arg(short, long)]
+        regions: Option<Vec<String>>,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Update security group to allow SSH from current IP
+    UpdateIp {
+        /// Instance name (updates all instances if not specified)
+        name: Option<String>,
+    },
+
     /// List active tunnels
     Tunnels {
         /// Instance name (show all if not specified)
@@ -254,6 +271,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Commands::Sync { name }) => {
             cmd_sync(name.as_deref()).await
+        }
+        Some(Commands::SyncState { regions, yes }) => {
+            cmd_sync_state(regions.as_deref(), yes).await
+        }
+        Some(Commands::UpdateIp { name }) => {
+            cmd_update_ip(name.as_deref()).await
         }
         Some(Commands::Tunnels { name }) => {
             cmd_tunnels(name.as_deref()).await
@@ -786,9 +809,49 @@ async fn cmd_attach(name: Option<&str>) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    crate::ssh::attach(&instance)?;
+    // Try to attach
+    match crate::ssh::attach(&instance) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Check if it's a connection error (could be wrong IP)
+            let error_msg = e.to_string();
+            if error_msg.contains("Connection") || error_msg.contains("timed out") || error_msg.contains("refused") {
+                println!();
+                println!("{}", "SSH connection failed!".yellow());
+                println!("This might be because your IP address has changed.");
+                println!();
 
-    Ok(())
+                use std::io::{self, Write};
+                print!("{} ", "Update security group to allow your current IP? [Y/n]:".bright_white());
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
+                    println!();
+                    // Get current IP
+                    let my_ip = crate::aws::ec2::get_my_public_ip().await?;
+                    println!("Current IP: {}", my_ip.bright_cyan());
+
+                    // Update security group
+                    println!("{} Updating security group...", "→".bright_white());
+                    crate::aws::ec2::update_security_group_ip(&instance.region, &my_ip).await?;
+                    println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
+                    println!();
+
+                    // Retry attach
+                    println!("{} Retrying connection...", "→".bright_white());
+                    crate::ssh::attach(&instance)?;
+                    Ok(())
+                } else {
+                    Err(e.into())
+                }
+            } else {
+                Err(e.into())
+            }
+        }
+    }
 }
 
 async fn cmd_forward(
@@ -911,6 +974,159 @@ async fn cmd_sync(name: Option<&str>) -> Result<()> {
     let mut updated = instance.clone();
     updated.last_synced = Some(crate::util::current_timestamp());
     db.upsert_instance(&updated)?;
+
+    Ok(())
+}
+
+async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+    let config = crate::config::Config::load()?;
+
+    // Determine regions to query
+    let regions_to_query = if let Some(regions) = regions {
+        regions.to_vec()
+    } else {
+        // Use regions from all profiles
+        let mut profile_regions: std::collections::HashSet<String> = config
+            .profiles
+            .iter()
+            .map(|p| p.region.clone())
+            .collect();
+
+        // Add current instances' regions
+        for instance in db.list_instances()? {
+            profile_regions.insert(instance.region.clone());
+        }
+
+        profile_regions.into_iter().collect()
+    };
+
+    println!("{}", "Discovering nydus-managed instances from AWS...".bright_white());
+    println!("Regions: {}", regions_to_query.join(", ").dimmed());
+    println!();
+
+    // Discover instances from AWS
+    let discovered = crate::aws::ec2::discover_nydus_instances(regions_to_query).await?;
+
+    if discovered.is_empty() {
+        println!("{}", "No nydus-managed instances found in AWS.".yellow());
+        return Ok(());
+    }
+
+    // Show what will be synced
+    println!("{} instances found:", discovered.len().to_string().bright_white());
+    for instance in &discovered {
+        let status_display = instance.status.as_deref().unwrap_or("unknown");
+        let status_colored = if status_display.to_lowercase().contains("running") {
+            status_display.green()
+        } else {
+            status_display.yellow()
+        };
+
+        println!(
+            "  {} {} ({}) - {} in {}",
+            "•".bright_white(),
+            instance.name.bright_cyan(),
+            status_colored,
+            instance.instance_id.dimmed(),
+            instance.region.dimmed()
+        );
+    }
+    println!();
+
+    // Prompt for confirmation unless --yes flag
+    if !skip_confirm {
+        use std::io::{self, Write};
+        print!("{} ", "Sync these instances to local state? [y/N]:".bright_white());
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", "Cancelled.".yellow());
+            return Ok(());
+        }
+    }
+
+    // Sync to local state
+    println!("{}", "Syncing to local state...".bright_white());
+    let mut synced_count = 0;
+    let mut updated_count = 0;
+
+    for instance in discovered {
+        // Check if instance already exists in local state
+        let existing = db.get_instance(&instance.name).ok();
+
+        if existing.is_some() {
+            updated_count += 1;
+            println!("  {} Updated {}", "↻".yellow(), instance.name.dimmed());
+        } else {
+            synced_count += 1;
+            println!("  {} Added {}", "✓".green(), instance.name.bright_white());
+        }
+
+        db.upsert_instance(&instance)?;
+    }
+
+    println!();
+    println!(
+        "{} {} instances synced ({} new, {} updated)",
+        "✓".green(),
+        (synced_count + updated_count).to_string().bright_white(),
+        synced_count.to_string().green(),
+        updated_count.to_string().yellow()
+    );
+
+    Ok(())
+}
+
+async fn cmd_update_ip(name: Option<&str>) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    // Get current public IP
+    println!("{}", "Getting your current public IP...".bright_white());
+    let my_ip = crate::aws::ec2::get_my_public_ip().await?;
+    println!("Current IP: {}", my_ip.bright_cyan());
+    println!();
+
+    // Get instances to update
+    let instances: Vec<_> = if let Some(name) = name {
+        vec![db.get_instance(name)?]
+    } else {
+        db.list_instances()?
+    };
+
+    if instances.is_empty() {
+        println!("{}", "No instances found.".yellow());
+        return Ok(());
+    }
+
+    // Update security group for each instance
+    for instance in instances {
+        println!(
+            "{} Updating security group for {}...",
+            "→".bright_white(),
+            instance.name.bright_cyan()
+        );
+
+        // Update the security group
+        crate::aws::ec2::update_security_group_ip(&instance.region, &my_ip).await?;
+
+        println!(
+            "  {} SSH access allowed from {}",
+            "✓".green(),
+            my_ip.bright_white()
+        );
+    }
+
+    println!();
+    println!(
+        "{} Security groups updated! You can now SSH from your current network.",
+        "✓".green()
+    );
 
     Ok(())
 }

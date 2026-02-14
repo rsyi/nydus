@@ -54,6 +54,12 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
             .build());
     }
 
+    // Add nydus metadata tags for state reconstruction
+    tags.push(Tag::builder().key("nydus:profile").value(&profile.name).build());
+    tags.push(Tag::builder().key("nydus:ssh-user").value(&profile.ssh_user).build());
+    tags.push(Tag::builder().key("nydus:ssh-key-path").value(&profile.ssh_key_path).build());
+    tags.push(Tag::builder().key("nydus:created-at").value(chrono::Utc::now().timestamp().to_string()).build());
+
     for (key, value) in &profile.tags {
         tags.push(Tag::builder().key(key).value(value).build());
     }
@@ -505,7 +511,7 @@ async fn ensure_security_group(client: &Client, instance_name: &str) -> Result<S
 }
 
 /// Get my public IP address
-async fn get_my_public_ip() -> Result<String> {
+pub async fn get_my_public_ip() -> Result<String> {
     // Use ipify.org to get public IP
     let response = reqwest::get("https://api.ipify.org")
         .await
@@ -517,4 +523,177 @@ async fn get_my_public_ip() -> Result<String> {
         .map_err(|e| NydusError::AwsError(format!("Failed to read public IP: {}", e)))?;
 
     Ok(ip.trim().to_string())
+}
+
+/// Discover all nydus-managed instances from AWS across specified regions
+pub async fn discover_nydus_instances(regions: Vec<String>) -> Result<Vec<Instance>> {
+    let mut discovered_instances = Vec::new();
+
+    for region in regions {
+        match discover_nydus_instances_in_region(&region).await {
+            Ok(mut instances) => {
+                discovered_instances.append(&mut instances);
+            }
+            Err(e) => {
+                eprintln!("⚠ Failed to query region {}: {}", region, e);
+            }
+        }
+    }
+
+    Ok(discovered_instances)
+}
+
+/// Discover nydus-managed instances in a specific region
+async fn discover_nydus_instances_in_region(region: &str) -> Result<Vec<Instance>> {
+    let client = initialize_ec2_client(region).await?;
+
+    // Query for instances with ManagedBy: nydus tag
+    let filter = Filter::builder()
+        .name("tag:ManagedBy")
+        .values("nydus")
+        .build();
+
+    let describe_result = client
+        .describe_instances()
+        .filters(filter)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to describe instances: {:?}", e)))?;
+
+    let mut instances = Vec::new();
+
+    for reservation in describe_result.reservations() {
+        for ec2_instance in reservation.instances() {
+            // Extract instance metadata from tags
+            let tags: std::collections::HashMap<String, String> = ec2_instance
+                .tags()
+                .iter()
+                .filter_map(|tag| {
+                    let key = tag.key()?;
+                    let value = tag.value()?;
+                    Some((key.to_string(), value.to_string()))
+                })
+                .collect();
+
+            let instance_id = ec2_instance.instance_id().unwrap_or("unknown").to_string();
+            let name = tags.get("Name").cloned().unwrap_or(instance_id.clone());
+            let profile = tags.get("nydus:profile").cloned().unwrap_or("default".to_string());
+            let ssh_user = tags.get("nydus:ssh-user").cloned().unwrap_or("ubuntu".to_string());
+            let ssh_key_path = tags
+                .get("nydus:ssh-key-path")
+                .cloned()
+                .unwrap_or("~/.ssh/id_ed25519".to_string());
+            let created_at = tags
+                .get("nydus:created-at")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+            let public_ip = ec2_instance
+                .public_ip_address()
+                .map(|s| s.to_string());
+            let public_dns = ec2_instance
+                .public_dns_name()
+                .map(|s| s.to_string());
+            let private_ip = ec2_instance
+                .private_ip_address()
+                .map(|s| s.to_string());
+
+            let status = ec2_instance
+                .state()
+                .and_then(|s| s.name())
+                .map(|s| format!("{:?}", s))
+                .unwrap_or("unknown".to_string());
+
+            let instance = Instance {
+                id: None, // Will be set when saved to DB
+                name,
+                profile,
+                region: region.to_string(),
+                instance_id,
+                public_ip,
+                public_dns,
+                private_ip,
+                ssh_user,
+                ssh_key_path,
+                created_at,
+                last_seen: chrono::Utc::now().timestamp(),
+                last_synced: None,
+                desired_state: "running".to_string(),
+                status: Some(status),
+                notes: None,
+            };
+
+            instances.push(instance);
+        }
+    }
+
+    Ok(instances)
+}
+
+/// Update security group to allow SSH from a new IP address
+pub async fn update_security_group_ip(region: &str, new_ip: &str) -> Result<()> {
+    let client = initialize_ec2_client(region).await?;
+
+    // Find security group by name or tag
+    let sg_filter = Filter::builder()
+        .name("group-name")
+        .values("nydus-sg")
+        .build();
+
+    let describe_result = client
+        .describe_security_groups()
+        .filters(sg_filter)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to find security group: {:?}", e)))?;
+
+    let security_group = describe_result
+        .security_groups()
+        .first()
+        .ok_or_else(|| NydusError::AwsError("Security group 'nydus-sg' not found".to_string()))?;
+
+    let sg_id = security_group
+        .group_id()
+        .ok_or_else(|| NydusError::AwsError("Security group ID not available".to_string()))?;
+
+    // Remove existing SSH rules (we'll replace them)
+    for permission in security_group.ip_permissions() {
+        // Only revoke SSH rules (port 22)
+        if let Some(port) = permission.from_port() {
+            if port == 22 {
+                client
+                    .revoke_security_group_ingress()
+                    .group_id(sg_id)
+                    .ip_permissions(permission.clone())
+                    .send()
+                    .await
+                    .ok(); // Ignore errors if rule doesn't exist
+            }
+        }
+    }
+
+    // Add new SSH rule with current IP
+    use aws_sdk_ec2::types::{IpPermission, IpRange};
+
+    let ip_range = IpRange::builder()
+        .cidr_ip(format!("{}/32", new_ip))
+        .description("SSH access from current IP (updated by nydus)")
+        .build();
+
+    let permission = IpPermission::builder()
+        .ip_protocol("tcp")
+        .from_port(22)
+        .to_port(22)
+        .ip_ranges(ip_range)
+        .build();
+
+    client
+        .authorize_security_group_ingress()
+        .group_id(sg_id)
+        .ip_permissions(permission)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to update security group: {:?}", e)))?;
+
+    Ok(())
 }
