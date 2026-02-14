@@ -66,8 +66,7 @@ cargo install --path .
 ### 1. Install nydus
 
 ```bash
-cargo install --path .
-# Or use the alias from your shell config
+curl -fsSL https://raw.githubusercontent.com/oxy-hq/nydus/main/install.sh | bash
 ```
 
 ### 2. Initialize nydus
