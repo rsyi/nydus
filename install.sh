@@ -40,7 +40,12 @@ case "${ARCH}" in
         ;;
 esac
 
-BINARY_NAME="nydus-${PLATFORM}-${ARCH_NAME}"
+# Special handling for Android/Termux (use musl binary)
+if [[ -n "${ANDROID_ROOT}" ]] && [[ "${ARCH_NAME}" == "aarch64" ]]; then
+    BINARY_NAME="nydus-android-${ARCH_NAME}"
+else
+    BINARY_NAME="nydus-${PLATFORM}-${ARCH_NAME}"
+fi
 DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 
 echo -e "Platform: ${GREEN}${PLATFORM}${NC}"
