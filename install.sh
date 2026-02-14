@@ -2,9 +2,9 @@
 set -e
 
 # Nydus installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/oxy-hq/nydus/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/rsyi/nydus/main/install.sh | bash
 
-REPO="oxy-hq/nydus"
+REPO="rsyi/nydus"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors
