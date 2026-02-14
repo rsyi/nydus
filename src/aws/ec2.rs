@@ -631,30 +631,42 @@ async fn discover_nydus_instances_in_region(region: &str) -> Result<Vec<Instance
 }
 
 /// Update security group to allow SSH from a new IP address
-pub async fn update_security_group_ip(region: &str, new_ip: &str) -> Result<()> {
+pub async fn update_security_group_ip(region: &str, instance_id: &str, new_ip: &str) -> Result<()> {
     let client = initialize_ec2_client(region).await?;
 
-    // Find security group by name or tag
-    let sg_filter = Filter::builder()
-        .name("group-name")
-        .values("nydus-sg")
-        .build();
-
-    let describe_result = client
-        .describe_security_groups()
-        .filters(sg_filter)
+    // Get the instance to find its security group
+    let describe_instances = client
+        .describe_instances()
+        .instance_ids(instance_id)
         .send()
         .await
-        .map_err(|e| NydusError::AwsError(format!("Failed to find security group: {:?}", e)))?;
+        .map_err(|e| NydusError::AwsError(format!("Failed to describe instance: {:?}", e)))?;
+
+    let instance = describe_instances
+        .reservations()
+        .first()
+        .and_then(|r| r.instances().first())
+        .ok_or_else(|| NydusError::AwsError("Instance not found".to_string()))?;
+
+    // Get the first security group from the instance
+    let sg_id = instance
+        .security_groups()
+        .first()
+        .and_then(|sg| sg.group_id())
+        .ok_or_else(|| NydusError::AwsError("Instance has no security group".to_string()))?;
+
+    // Get security group details
+    let describe_result = client
+        .describe_security_groups()
+        .group_ids(sg_id)
+        .send()
+        .await
+        .map_err(|e| NydusError::AwsError(format!("Failed to describe security group: {:?}", e)))?;
 
     let security_group = describe_result
         .security_groups()
         .first()
-        .ok_or_else(|| NydusError::AwsError("Security group 'nydus-sg' not found".to_string()))?;
-
-    let sg_id = security_group
-        .group_id()
-        .ok_or_else(|| NydusError::AwsError("Security group ID not available".to_string()))?;
+        .ok_or_else(|| NydusError::AwsError("Security group not found".to_string()))?;
 
     // Remove existing SSH rules (we'll replace them)
     for permission in security_group.ip_permissions() {

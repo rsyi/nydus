@@ -836,7 +836,7 @@ async fn cmd_attach(name: Option<&str>) -> Result<()> {
 
                     // Update security group
                     println!("{} Updating security group...", "→".bright_white());
-                    crate::aws::ec2::update_security_group_ip(&instance.region, &my_ip).await?;
+                    crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
                     println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
                     println!();
 
@@ -1113,7 +1113,7 @@ async fn cmd_update_ip(name: Option<&str>) -> Result<()> {
         );
 
         // Update the security group
-        crate::aws::ec2::update_security_group_ip(&instance.region, &my_ip).await?;
+        crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
 
         println!(
             "  {} SSH access allowed from {}",
