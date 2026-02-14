@@ -22,40 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/rsyi/nydus/main/install.sh | bash
 
 This will automatically detect your platform and install the latest version.
 
-### Option 1: Download Prebuilt Binary
-
-**Linux x86_64:**
-```bash
-curl -L https://github.com/rsyi/nydus/releases/latest/download/nydus-linux-x86_64 -o nydus
-chmod +x nydus
-sudo mv nydus /usr/local/bin/
-```
-
-**Linux ARM64 (Android, ARM servers):**
-```bash
-curl -L https://github.com/rsyi/nydus/releases/latest/download/nydus-linux-aarch64 -o nydus
-chmod +x nydus
-# For Termux on Android:
-mv nydus ~/bin/nydus
-# For regular Linux:
-# sudo mv nydus /usr/local/bin/
-```
-
-**macOS (Apple Silicon):**
-```bash
-curl -L https://github.com/rsyi/nydus/releases/latest/download/nydus-macos-aarch64 -o nydus
-chmod +x nydus
-sudo mv nydus /usr/local/bin/
-```
-
-**macOS (Intel):**
-```bash
-curl -L https://github.com/rsyi/nydus/releases/latest/download/nydus-macos-x86_64 -o nydus
-chmod +x nydus
-sudo mv nydus /usr/local/bin/
-```
-
-### Option 2: Build from Source
+### Build from Source
 
 ```bash
 cargo install --path .
