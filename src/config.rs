@@ -130,7 +130,7 @@ impl Default for Profile {
             instance_type: "t3.medium".to_string(),
             ami: None,  // Will auto-resolve to latest Ubuntu
             ssh_user: "ubuntu".to_string(),
-            ssh_key_path: "~/.ssh/id_ed25519".to_string(),
+            ssh_key_path: "~/.ssh/nydus-key.pem".to_string(),
             security_group: None,
             subnet_id: None,
             volume_size_gb: 30,

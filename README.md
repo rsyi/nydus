@@ -177,7 +177,7 @@ profiles:
     instance_type: t3.medium
     ami: null  # Will use latest Ubuntu 22.04 LTS
     ssh_user: ubuntu
-    ssh_key_path: ~/.ssh/id_ed25519
+    ssh_key_path: ~/.ssh/nydus-key.pem
     security_group: null  # Will create automatically
     subnet_id: null
     volume_size_gb: 20
@@ -188,7 +188,7 @@ profiles:
       enabled: true
       git:
         ssh_keys:
-          - ~/.ssh/id_ed25519
+          - ~/.ssh/nydus-key.pem
         config: true  # Copy ~/.gitconfig
         gpg_keys: false
       claude:
