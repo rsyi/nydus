@@ -1043,8 +1043,38 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
     println!("{}", "Syncing to local state...".bright_white());
     let mut synced_count = 0;
     let mut updated_count = 0;
+    let mut skipped_count = 0;
 
-    for instance in discovered {
+    // Group by name to detect duplicates
+    let mut name_to_instances: std::collections::HashMap<String, Vec<crate::config::Instance>> = std::collections::HashMap::new();
+    for instance in &discovered {
+        name_to_instances.entry(instance.name.clone()).or_default().push(instance.clone());
+    }
+
+    for mut instance in discovered {
+        // Handle duplicate names
+        let instances_with_name = &name_to_instances[&instance.name];
+        if instances_with_name.len() > 1 {
+            // Multiple instances with same name
+            // If this is a terminated instance and there's a non-terminated one, skip it
+            let is_terminated = instance.status.as_ref().map(|s| s.to_lowercase().contains("terminated")).unwrap_or(false);
+            let has_active_duplicate = instances_with_name.iter().any(|i| {
+                i.instance_id != instance.instance_id &&
+                !i.status.as_ref().map(|s| s.to_lowercase().contains("terminated")).unwrap_or(true)
+            });
+
+            if is_terminated && has_active_duplicate {
+                println!("  {} Skipped {} (terminated, active instance exists)", "⊘".yellow(), instance.name.dimmed());
+                skipped_count += 1;
+                continue;
+            }
+
+            // Otherwise append instance ID suffix to make unique
+            let short_id = &instance.instance_id[instance.instance_id.len().saturating_sub(8)..];
+            instance.name = format!("{}-{}", instance.name, short_id);
+            println!("  {} Renamed to {} (duplicate name)", "✓".green(), instance.name.bright_white());
+        }
+
         // Check if instance already exists in local state
         let existing = db.get_instance(&instance.name).ok();
 
@@ -1060,13 +1090,24 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
     }
 
     println!();
-    println!(
-        "{} {} instances synced ({} new, {} updated)",
-        "✓".green(),
-        (synced_count + updated_count).to_string().bright_white(),
-        synced_count.to_string().green(),
-        updated_count.to_string().yellow()
-    );
+    if skipped_count > 0 {
+        println!(
+            "{} {} instances synced ({} new, {} updated, {} skipped)",
+            "✓".green(),
+            (synced_count + updated_count).to_string().bright_white(),
+            synced_count.to_string().green(),
+            updated_count.to_string().yellow(),
+            skipped_count.to_string().dimmed()
+        );
+    } else {
+        println!(
+            "{} {} instances synced ({} new, {} updated)",
+            "✓".green(),
+            (synced_count + updated_count).to_string().bright_white(),
+            synced_count.to_string().green(),
+            updated_count.to_string().yellow()
+        );
+    }
 
     Ok(())
 }
