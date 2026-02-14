@@ -23,9 +23,9 @@ jobs:
             target: aarch64-unknown-linux-gnu
             artifact_name: nydus-linux-aarch64
 
-          # Linux ARM64 with musl (for Android/Termux)
+          # Android ARM64 (for Termux)
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+            target: aarch64-linux-android
             artifact_name: nydus-android-aarch64
 
           # macOS Intel
@@ -48,13 +48,13 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tool
-        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-linux-android'
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build binary
         run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]] || [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]] || [[ "${{ matrix.target }}" == "aarch64-linux-android" ]]; then
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
