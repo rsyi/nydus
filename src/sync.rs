@@ -22,6 +22,9 @@ pub fn sync_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     // Install Claude Code
     install_claude_code(instance)?;
 
+    // Install OpenClaw
+    install_openclaw(instance)?;
+
     // Sync git credentials
     if !profile.sync_credentials.git.ssh_keys.is_empty()
         || profile.sync_credentials.git.config
@@ -350,7 +353,7 @@ fi
 }
 
 /// Clone git repositories to home directory
-fn clone_repositories(instance: &Instance, repositories: &[String]) -> Result<()> {
+fn clone_repositories(instance: &Instance, repositories: &[crate::config::RepositoryConfig]) -> Result<()> {
     println!("    → Cloning repositories...");
 
     // Add GitHub's host key to known_hosts to avoid host verification failure
@@ -360,7 +363,9 @@ fn clone_repositories(instance: &Instance, repositories: &[String]) -> Result<()
     let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let mut spin_idx = 0;
 
-    for repo_url in repositories {
+    for repo in repositories {
+        let repo_url = repo.url();
+
         // Extract repository name from URL (e.g., git@github.com:user/repo.git -> repo)
         let repo_name = repo_url
             .split('/')
@@ -374,26 +379,33 @@ fn clone_repositories(instance: &Instance, repositories: &[String]) -> Result<()
 
         // Check if repository already exists
         let check_cmd = format!("test -d ~/{}", repo_name);
-        if run_remote_command(instance, &check_cmd).is_ok() {
+        let already_exists = run_remote_command(instance, &check_cmd).is_ok();
+
+        if already_exists {
             print!("\r\x1b[2K");
             println!("      {} {} (already exists)", "↓".dimmed(), repo_name.dimmed());
-            continue;
+        } else {
+            // Clone the repository
+            let clone_cmd = format!("cd ~ && git clone {} 2>&1", repo_url);
+            match run_remote_command(instance, &clone_cmd) {
+                Ok(_) => {
+                    print!("\r\x1b[2K");
+                    println!("      ✓ Cloned {}", repo_name.bright_white());
+                }
+                Err(_) => {
+                    print!("\r\x1b[2K");
+                    eprintln!("      ⚠ Failed to clone {}", repo_name);
+                    continue;
+                }
+            }
         }
 
-        // Clone the repository
-        let clone_cmd = format!(
-            "cd ~ && git clone {} 2>&1",
-            repo_url
-        );
-
-        match run_remote_command(instance, &clone_cmd) {
-            Ok(_) => {
-                print!("\r\x1b[2K");
-                println!("      ✓ Cloned {}", repo_name.bright_white());
-            }
-            Err(_) => {
-                print!("\r\x1b[2K");
-                eprintln!("      ⚠ Failed to clone {}", repo_name);
+        // Run setup commands (e.g., mise trust)
+        for cmd in repo.setup_commands() {
+            let full_cmd = format!("cd ~/{} && bash -lc {:?}", repo_name, cmd);
+            match run_remote_command(instance, &full_cmd) {
+                Ok(_) => println!("      ✓ Ran: {}", cmd.dimmed()),
+                Err(_) => eprintln!("      ⚠ Failed: {}", cmd),
             }
         }
     }
@@ -790,6 +802,45 @@ fi
 }
 
 /// Install Claude Code
+fn install_openclaw(instance: &Instance) -> Result<()> {
+    println!("  → Installing OpenClaw...");
+
+    // Check if openclaw is already installed
+    let check_result = run_remote_command(instance, "bash -lc 'which openclaw 2>/dev/null'");
+    if check_result.is_ok() {
+        println!("    ✓ OpenClaw already installed");
+        return Ok(());
+    }
+
+    let install_script = r#"
+set -e
+curl -fsSL https://openclaw.ai/install.sh | bash
+if command -v openclaw >/dev/null 2>&1 || [ -f "$HOME/.local/bin/openclaw" ]; then
+    echo "SUCCESS: OpenClaw installed"
+else
+    echo "ERROR: Installation completed but openclaw not found"
+    exit 1
+fi
+"#;
+
+    match run_remote_command(instance, install_script) {
+        Ok(output) => {
+            if output.contains("SUCCESS") {
+                println!("{}", "    ✓ OpenClaw installed".green());
+            } else {
+                println!("{}", "    ⚠ Installation uncertain".yellow());
+            }
+        }
+        Err(_) => {
+            println!("{}", "    ⚠ OpenClaw installation failed".yellow());
+            println!("    Install manually after connecting:");
+            println!("    {}", "curl -fsSL https://openclaw.ai/install.sh | bash".bright_white());
+        }
+    }
+
+    Ok(())
+}
+
 fn install_claude_code(instance: &Instance) -> Result<()> {
     println!("  → Installing Claude Code...");
 

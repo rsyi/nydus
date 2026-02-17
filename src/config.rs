@@ -127,7 +127,7 @@ impl Default for Profile {
         Profile {
             name: "default".to_string(),
             region: "us-east-1".to_string(),
-            instance_type: "t3.medium".to_string(),
+            instance_type: "t3.xlarge".to_string(),
             ami: None,  // Will auto-resolve to latest Ubuntu
             ssh_user: "ubuntu".to_string(),
             ssh_key_path: "~/.ssh/nydus-key.pem".to_string(),
@@ -184,7 +184,35 @@ pub struct GitSync {
     #[serde(default)]
     pub gpg_keys: bool,
     #[serde(default)]
-    pub repositories: Vec<String>,  // Git repos to clone (e.g., git@github.com:user/repo.git)
+    pub repositories: Vec<RepositoryConfig>,  // Git repos to clone
+}
+
+/// Repository configuration - can be a plain URL string or a struct with setup_commands
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RepositoryConfig {
+    Url(String),
+    Full {
+        url: String,
+        #[serde(default)]
+        setup_commands: Vec<String>,
+    },
+}
+
+impl RepositoryConfig {
+    pub fn url(&self) -> &str {
+        match self {
+            RepositoryConfig::Url(url) => url,
+            RepositoryConfig::Full { url, .. } => url,
+        }
+    }
+
+    pub fn setup_commands(&self) -> &[String] {
+        match self {
+            RepositoryConfig::Url(_) => &[],
+            RepositoryConfig::Full { setup_commands, .. } => setup_commands,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
