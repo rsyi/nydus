@@ -20,11 +20,42 @@ pub fn state_db_path() -> Result<PathBuf> {
     Ok(nydus_dir()?.join("state.sqlite"))
 }
 
+/// Get the CLAUDE.md path (~/.nydus/CLAUDE.md)
+pub fn claude_md_path() -> Result<PathBuf> {
+    Ok(nydus_dir()?.join("CLAUDE.md"))
+}
+
+pub const DEFAULT_CLAUDE_MD: &str = r#"# OpenClaw Setup
+
+## 1. Onboard
+
+```
+openclaw onboard --install-daemon
+```
+
+Skip the Anthropic API key step during the wizard.
+
+## 2. Set up Claude Max auth
+
+```
+claude setup-token
+openclaw models auth paste-token
+openclaw models auth order set --provider anthropic anthropic:manual
+```
+
+## 3. Open the dashboard
+
+```
+http://127.0.0.1:18789/?token=<token from ~/.openclaw/openclaw.json → gateway.auth.token>
+```
+"#;
+
 /// Initialize the nydus directory and create default config
 pub struct InitResult {
     pub dir_created: bool,
     pub config_created: bool,
     pub db_created: bool,
+    pub claude_md_created: bool,
 }
 
 pub fn init_nydus_dir() -> Result<InitResult> {
@@ -50,7 +81,15 @@ pub fn init_nydus_dir() -> Result<InitResult> {
     let db_created = !db_path.exists();
     crate::state::StateDb::open(&db_path)?;
 
-    Ok(InitResult { dir_created, config_created, db_created })
+    let claude_md_file = claude_md_path()?;
+    let claude_md_created = if !claude_md_file.exists() {
+        fs::write(&claude_md_file, DEFAULT_CLAUDE_MD)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(InitResult { dir_created, config_created, db_created, claude_md_created })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

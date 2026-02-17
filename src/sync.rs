@@ -806,30 +806,11 @@ fi
 
 /// Install Claude Code
 fn write_claude_md(instance: &Instance) -> Result<()> {
-    let content = r#"# OpenClaw Setup
-
-## 1. Onboard
-
-```
-openclaw onboard --install-daemon
-```
-
-Skip the Anthropic API key step during the wizard.
-
-## 2. Set up Claude Max auth
-
-```
-claude setup-token
-openclaw models auth paste-token
-openclaw models auth order set --provider anthropic anthropic:manual
-```
-
-## 3. Open the dashboard
-
-```
-http://127.0.0.1:18789/?token=<token from ~/.openclaw/openclaw.json → gateway.auth.token>
-```
-"#;
+    // Use local ~/.nydus/CLAUDE.md if it exists, otherwise use the built-in default
+    let content = match crate::config::claude_md_path().ok().filter(|p| p.exists()) {
+        Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|_| crate::config::DEFAULT_CLAUDE_MD.to_string()),
+        None => crate::config::DEFAULT_CLAUDE_MD.to_string(),
+    };
 
     let cmd = format!("cat > ~/CLAUDE.md << 'NYDUS_EOF'\n{}\nNYDUS_EOF", content);
     match run_remote_command(instance, &cmd) {

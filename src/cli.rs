@@ -235,6 +235,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("{}", "~ state.sqlite already exists (not overwritten)".dimmed());
             }
+            if result.claude_md_created {
+                println!("{}", "✓ Created CLAUDE.md (edit to customize remote setup instructions)".green());
+            } else {
+                println!("{}", "~ CLAUDE.md already exists (not overwritten)".dimmed());
+            }
             Ok(())
         }
         Some(Commands::Tui) | None => {
