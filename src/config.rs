@@ -261,7 +261,7 @@ impl Default for ToolsConfig {
             },
             languages: LanguagesConfig {
                 rust: Some(true),
-                node: Some("20".to_string()),
+                node: Some("22".to_string()),
                 pnpm: Some(true),
                 python: None,
                 go: None,

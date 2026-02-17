@@ -812,7 +812,7 @@ fn install_openclaw(instance: &Instance) -> Result<()> {
         return Ok(());
     }
 
-    let install_script = r#"
+    let install_script = r#"bash -lc '
 set -e
 curl -fsSL https://openclaw.ai/install.sh | bash
 if command -v openclaw >/dev/null 2>&1 || [ -f "$HOME/.local/bin/openclaw" ]; then
@@ -821,7 +821,7 @@ else
     echo "ERROR: Installation completed but openclaw not found"
     exit 1
 fi
-"#;
+'"#;
 
     match run_remote_command(instance, install_script) {
         Ok(output) => {
