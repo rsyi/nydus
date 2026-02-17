@@ -14,9 +14,8 @@ pub fn attach(instance: &Instance) -> Result<()> {
 
     println!("Connecting to {}@{}...", ssh_user, host);
 
-    // Try to attach to existing tmux session, or create new one
-    // Command: if tmux ls &>/dev/null; then tmux a; else tmux; fi
-    let tmux_command = "if tmux ls &>/dev/null; then tmux a; else tmux; fi";
+    // Update SSH agent symlink then attach/create tmux session
+    let tmux_command = "if [ -n \"$SSH_AUTH_SOCK\" ] && [ \"$SSH_AUTH_SOCK\" != \"$HOME/.ssh/ssh_auth_sock\" ]; then ln -sf \"$SSH_AUTH_SOCK\" \"$HOME/.ssh/ssh_auth_sock\"; export SSH_AUTH_SOCK=\"$HOME/.ssh/ssh_auth_sock\"; fi; if tmux ls &>/dev/null; then tmux a; else tmux; fi";
 
     let status = Command::new("ssh")
         .arg("-A")  // Enable SSH agent forwarding

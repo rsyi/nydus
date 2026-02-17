@@ -28,6 +28,9 @@ pub fn sync_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     // Write CLAUDE.md setup instructions
     write_claude_md(instance)?;
 
+    // Fix SSH agent forwarding for tmux
+    setup_ssh_agent_forwarding(instance)?;
+
     // Sync git credentials
     if !profile.sync_credentials.git.ssh_keys.is_empty()
         || profile.sync_credentials.git.config
@@ -805,6 +808,41 @@ fi
 }
 
 /// Install Claude Code
+/// Set up SSH agent forwarding to persist across tmux sessions.
+/// Without this, SSH_AUTH_SOCK becomes stale when reattaching to tmux.
+fn setup_ssh_agent_forwarding(instance: &Instance) -> Result<()> {
+    let setup_script = r#"
+# Create a fixed symlink for SSH_AUTH_SOCK so tmux sessions can find it
+mkdir -p ~/.ssh
+
+# Remove old version of the fix if present
+sed -i '/# nydus ssh-agent fix/,/^fi$/d' ~/.bashrc 2>/dev/null
+
+# Add to .bashrc if not already present
+if ! grep -q 'nydus ssh-agent fix v2' ~/.bashrc 2>/dev/null; then
+    cat >> ~/.bashrc << 'BASHRC_EOF'
+
+# nydus ssh-agent fix v2: keep SSH_AUTH_SOCK working inside tmux
+if [ -S "$HOME/.ssh/ssh_auth_sock" ]; then
+    export SSH_AUTH_SOCK="$HOME/.ssh/ssh_auth_sock"
+fi
+BASHRC_EOF
+fi
+
+# Also set it up right now for the current session
+if [ -n "$SSH_AUTH_SOCK" ] && [ "$SSH_AUTH_SOCK" != "$HOME/.ssh/ssh_auth_sock" ]; then
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock"
+fi
+"#;
+
+    match run_remote_command(instance, setup_script) {
+        Ok(_) => println!("  {} SSH agent forwarding configured for tmux", "✓".green()),
+        Err(_) => eprintln!("  ⚠ Failed to configure SSH agent forwarding"),
+    }
+
+    Ok(())
+}
+
 fn write_claude_md(instance: &Instance) -> Result<()> {
     // Use local ~/.nydus/CLAUDE.md if it exists, otherwise use the built-in default
     let content = match crate::config::claude_md_path().ok().filter(|p| p.exists()) {
