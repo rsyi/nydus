@@ -131,7 +131,7 @@ impl Default for Profile {
         tags.insert("ManagedBy".to_string(), "nydus".to_string());
 
         let mut env_vars = HashMap::new();
-        env_vars.insert("EDITOR".to_string(), "vim".to_string());
+        env_vars.insert("EDITOR".to_string(), "nvim".to_string());
         env_vars.insert("NODE_ENV".to_string(), "development".to_string());
 
         Profile {
