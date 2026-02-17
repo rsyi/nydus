@@ -360,7 +360,7 @@ async fn wait_for_instance_running(client: &Client, instance_id: &str) -> Result
 async fn wait_for_ssh_ready(instance: &Instance) -> Result<()> {
     use std::sync::Arc;
 
-    let max_duration = tokio::time::Duration::from_secs(60);
+    let max_duration = tokio::time::Duration::from_secs(180);
     let start_time = Arc::new(Instant::now());
 
     print!("⏱  Waiting for SSH to be ready... ");
@@ -384,7 +384,7 @@ async fn wait_for_ssh_ready(instance: &Instance) -> Result<()> {
     let check_task = tokio::spawn(async move {
         loop {
             if check_start.elapsed() >= max_duration {
-                return Err(NydusError::SshError("SSH did not become ready within 60 seconds".to_string()));
+                return Err(NydusError::SshError("SSH did not become ready within 3 minutes".to_string()));
             }
 
             match crate::ssh::run_remote_command(&instance_clone, "echo 'ready'") {

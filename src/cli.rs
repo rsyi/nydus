@@ -118,17 +118,15 @@ pub enum Commands {
     },
 
     /// Create SSH port forward
+    ///
+    /// PORT format: REMOTE or REMOTE:LOCAL (e.g. 8080 or 8080:9000)
     Forward {
         /// Instance name (uses current context if not specified)
         name: Option<String>,
 
-        /// Remote port
-        #[arg(long)]
-        remote: u16,
-
-        /// Local port (auto-assigned if not specified)
-        #[arg(long)]
-        local: Option<u16>,
+        /// Port mapping: REMOTE or REMOTE:LOCAL (e.g. 8080 or 8080:9000)
+        #[arg(value_name = "PORT")]
+        port: String,
 
         /// Remote host (default: 127.0.0.1)
         #[arg(long, default_value = "127.0.0.1")]
@@ -264,7 +262,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Commands::Attach { name }) => {
             cmd_attach(name.as_deref()).await
         }
-        Some(Commands::Forward { name, remote, local, remote_host, background, open }) => {
+        Some(Commands::Forward { name, port, remote_host, background, open }) => {
+            let (remote, local) = parse_port_mapping(&port)?;
             cmd_forward(name.as_deref(), remote, local, &remote_host, background, open).await
         }
         Some(Commands::Open { name, remote }) => {
@@ -841,6 +840,20 @@ async fn cmd_attach(name: Option<&str>) -> Result<()> {
     // Now attach
     crate::ssh::attach(&instance)?;
     Ok(())
+}
+
+fn parse_port_mapping(port: &str) -> Result<(u16, Option<u16>)> {
+    if let Some((remote, local)) = port.split_once(':') {
+        let remote = remote.parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("Invalid remote port: {}", remote))?;
+        let local = local.parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("Invalid local port: {}", local))?;
+        Ok((remote, Some(local)))
+    } else {
+        let remote = port.parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("Invalid port: {}. Use PORT or REMOTE:LOCAL (e.g. 8080 or 8080:9000)", port))?;
+        Ok((remote, None))
+    }
 }
 
 async fn cmd_forward(
