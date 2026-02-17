@@ -219,10 +219,22 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Commands::Init) => {
             println!("{}", "Initializing nydus...".cyan());
-            crate::config::init_nydus_dir()?;
-            println!("{}", "✓ Created ~/.nydus/ directory".green());
-            println!("{}", "✓ Created config.yml".green());
-            println!("{}", "✓ Created state.sqlite database".green());
+            let result = crate::config::init_nydus_dir()?;
+            if result.dir_created {
+                println!("{}", "✓ Created ~/.nydus/ directory".green());
+            } else {
+                println!("{}", "~ ~/.nydus/ already exists".dimmed());
+            }
+            if result.config_created {
+                println!("{}", "✓ Created config.yaml".green());
+            } else {
+                println!("{}", "~ config.yaml already exists (not overwritten)".dimmed());
+            }
+            if result.db_created {
+                println!("{}", "✓ Created state.sqlite database".green());
+            } else {
+                println!("{}", "~ state.sqlite already exists (not overwritten)".dimmed());
+            }
             Ok(())
         }
         Some(Commands::Tui) | None => {

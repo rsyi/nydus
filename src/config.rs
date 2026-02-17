@@ -21,26 +21,36 @@ pub fn state_db_path() -> Result<PathBuf> {
 }
 
 /// Initialize the nydus directory and create default config
-pub fn init_nydus_dir() -> Result<()> {
+pub struct InitResult {
+    pub dir_created: bool,
+    pub config_created: bool,
+    pub db_created: bool,
+}
+
+pub fn init_nydus_dir() -> Result<InitResult> {
     let dir = nydus_dir()?;
 
-    // Create directory if it doesn't exist
-    if !dir.exists() {
+    let dir_created = if !dir.exists() {
         fs::create_dir_all(&dir)?;
-    }
+        true
+    } else {
+        false
+    };
 
-    // Create default config if it doesn't exist
     let config_file = config_path()?;
-    if !config_file.exists() {
+    let config_created = if !config_file.exists() {
         let default_config = Config::default();
         default_config.save()?;
-    }
+        true
+    } else {
+        false
+    };
 
-    // Initialize state database
     let db_path = state_db_path()?;
+    let db_created = !db_path.exists();
     crate::state::StateDb::open(&db_path)?;
 
-    Ok(())
+    Ok(InitResult { dir_created, config_created, db_created })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
