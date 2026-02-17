@@ -25,6 +25,9 @@ pub fn sync_credentials(instance: &Instance, profile: &Profile) -> Result<()> {
     // Install OpenClaw
     install_openclaw(instance)?;
 
+    // Write CLAUDE.md setup instructions
+    write_claude_md(instance)?;
+
     // Sync git credentials
     if !profile.sync_credentials.git.ssh_keys.is_empty()
         || profile.sync_credentials.git.config
@@ -802,6 +805,41 @@ fi
 }
 
 /// Install Claude Code
+fn write_claude_md(instance: &Instance) -> Result<()> {
+    let content = r#"# OpenClaw Setup
+
+## 1. Onboard
+
+```
+openclaw onboard --install-daemon
+```
+
+Skip the Anthropic API key step during the wizard.
+
+## 2. Set up Claude Max auth
+
+```
+claude setup-token
+openclaw models auth paste-token
+openclaw models auth order set --provider anthropic anthropic:manual
+```
+
+## 3. Open the dashboard
+
+```
+http://127.0.0.1:18789/?token=<token from ~/.openclaw/openclaw.json → gateway.auth.token>
+```
+"#;
+
+    let cmd = format!("cat > ~/CLAUDE.md << 'NYDUS_EOF'\n{}\nNYDUS_EOF", content);
+    match run_remote_command(instance, &cmd) {
+        Ok(_) => println!("  {} Wrote ~/CLAUDE.md", "✓".green()),
+        Err(_) => eprintln!("  ⚠ Failed to write ~/CLAUDE.md"),
+    }
+
+    Ok(())
+}
+
 fn install_openclaw(instance: &Instance) -> Result<()> {
     println!("  → Installing OpenClaw...");
 
