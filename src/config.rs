@@ -182,7 +182,7 @@ impl Default for Profile {
             ssh_key_path: "~/.ssh/nydus-key.pem".to_string(),
             security_group: None,
             subnet_id: None,
-            volume_size_gb: 30,
+            volume_size_gb: 64,
             tags,
             sync_credentials: SyncCredentials {
                 enabled: true,
