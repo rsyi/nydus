@@ -333,7 +333,7 @@ pub struct LanguagesConfig {
 }
 
 /// Instance represents an EC2 instance tracked by nydus
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Instance {
     pub id: Option<i64>,  // Database ID
     pub name: String,
@@ -354,7 +354,7 @@ pub struct Instance {
 }
 
 /// Tunnel represents an SSH port forward
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Tunnel {
     pub id: Option<i64>,  // Database ID
     pub instance_name: String,

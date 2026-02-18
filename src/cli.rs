@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 use colored::*;
+use serde_json::json;
 
 #[derive(Parser)]
 #[command(name = "nydus")]
@@ -9,6 +10,10 @@ use colored::*;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Output results as JSON (for machine/agent consumption)
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -115,6 +120,20 @@ pub enum Commands {
     Attach {
         /// Instance name (uses current context if not specified)
         name: Option<String>,
+
+        /// Auto-update security group without prompting
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Run a command on a remote instance (non-interactive)
+    Exec {
+        /// Instance name (uses current context if not specified)
+        name: Option<String>,
+
+        /// Command to run on remote instance
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 
     /// Create SSH port forward
@@ -216,102 +235,121 @@ pub enum ProfileCommands {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    let json = cli.json;
     match cli.command {
         Some(Commands::Init) => {
-            println!("{}", "Initializing nydus...".cyan());
-            let result = crate::config::init_nydus_dir()?;
-            if result.dir_created {
-                println!("{}", "✓ Created ~/.nydus/ directory".green());
-            } else {
-                println!("{}", "~ ~/.nydus/ already exists".dimmed());
-            }
-            if result.config_created {
-                println!("{}", "✓ Created config.yaml".green());
-            } else {
-                println!("{}", "~ config.yaml already exists (not overwritten)".dimmed());
-            }
-            if result.db_created {
-                println!("{}", "✓ Created state.sqlite database".green());
-            } else {
-                println!("{}", "~ state.sqlite already exists (not overwritten)".dimmed());
-            }
-            if result.claude_md_created {
-                println!("{}", "✓ Created CLAUDE.md (edit to customize remote setup instructions)".green());
-            } else {
-                println!("{}", "~ CLAUDE.md already exists (not overwritten)".dimmed());
-            }
-            Ok(())
+            cmd_init(json).await
         }
         Some(Commands::Tui) | None => {
+            if json {
+                println!("{}", json!({"error": "TUI is interactive and not supported in JSON mode"}));
+                return Ok(());
+            }
             // Launch TUI
             crate::tui::run().await
         }
         Some(Commands::Up { name, profile, no_sync }) => {
-            cmd_up(&name, &profile, !no_sync).await
+            cmd_up(&name, &profile, !no_sync, json).await
         }
         Some(Commands::Down { name, yes }) => {
-            cmd_down(name.as_deref(), yes).await
+            cmd_down(name.as_deref(), yes || json, json).await
         }
         Some(Commands::Stop { name }) => {
-            cmd_stop(name.as_deref()).await
+            cmd_stop(name.as_deref(), json).await
         }
         Some(Commands::Start { name }) => {
-            cmd_start(name.as_deref()).await
+            cmd_start(name.as_deref(), json).await
         }
         Some(Commands::Ls { no_refresh }) => {
-            cmd_ls(!no_refresh).await
+            cmd_ls(!no_refresh, json).await
         }
         Some(Commands::Status { name }) => {
-            cmd_status(name.as_deref()).await
+            cmd_status(name.as_deref(), json).await
         }
         Some(Commands::Refresh { name }) => {
-            cmd_refresh(name.as_deref()).await
+            cmd_refresh(name.as_deref(), json).await
         }
         Some(Commands::Forget { name, yes }) => {
-            cmd_forget(&name, yes).await
+            cmd_forget(&name, yes || json, json).await
         }
         Some(Commands::Import { instance_id, name, region, ssh_user, key, profile }) => {
-            cmd_import(&instance_id, &name, &region, &ssh_user, &key, &profile).await
+            cmd_import(&instance_id, &name, &region, &ssh_user, &key, &profile, json).await
         }
         Some(Commands::Switch { name }) => {
-            cmd_switch(&name).await
+            cmd_switch(&name, json).await
         }
-        Some(Commands::Attach { name }) => {
-            cmd_attach(name.as_deref()).await
+        Some(Commands::Attach { name, yes }) => {
+            cmd_attach(name.as_deref(), yes, json).await
+        }
+        Some(Commands::Exec { name, command }) => {
+            cmd_exec(name.as_deref(), &command, json).await
         }
         Some(Commands::Forward { name, port, remote_host, background, open }) => {
             let (remote, local) = parse_port_mapping(&port)?;
-            cmd_forward(name.as_deref(), remote, local, &remote_host, background, open).await
+            cmd_forward(name.as_deref(), remote, local, &remote_host, background || json, open, json).await
         }
         Some(Commands::Open { name, remote }) => {
-            cmd_open(name.as_deref(), remote).await
+            cmd_open(name.as_deref(), remote, json).await
         }
         Some(Commands::Sync { name }) => {
-            cmd_sync(name.as_deref()).await
+            cmd_sync(name.as_deref(), json).await
         }
         Some(Commands::SyncState { regions, yes }) => {
-            cmd_sync_state(regions.as_deref(), yes).await
+            cmd_sync_state(regions.as_deref(), yes || json, json).await
         }
         Some(Commands::UpdateIp { name }) => {
-            cmd_update_ip(name.as_deref()).await
+            cmd_update_ip(name.as_deref(), json).await
         }
         Some(Commands::Tunnels { name }) => {
-            cmd_tunnels(name.as_deref()).await
+            cmd_tunnels(name.as_deref(), json).await
         }
         Some(Commands::TunnelStop { id }) => {
-            cmd_tunnel_stop(id).await
+            cmd_tunnel_stop(id, json).await
         }
         Some(Commands::Profile(profile_cmd)) => {
-            cmd_profile(profile_cmd).await
-        }
-        _ => {
-            println!("Command not yet implemented");
-            Ok(())
+            cmd_profile(profile_cmd, json).await
         }
     }
 }
 
-async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
+async fn cmd_init(json: bool) -> Result<()> {
+    if !json {
+        println!("{}", "Initializing nydus...".cyan());
+    }
+    let result = crate::config::init_nydus_dir()?;
+    if json {
+        println!("{}", json!({
+            "dir_created": result.dir_created,
+            "config_created": result.config_created,
+            "db_created": result.db_created,
+            "claude_md_created": result.claude_md_created,
+        }));
+        return Ok(());
+    }
+    if result.dir_created {
+        println!("{}", "✓ Created ~/.nydus/ directory".green());
+    } else {
+        println!("{}", "~ ~/.nydus/ already exists".dimmed());
+    }
+    if result.config_created {
+        println!("{}", "✓ Created config.yaml".green());
+    } else {
+        println!("{}", "~ config.yaml already exists (not overwritten)".dimmed());
+    }
+    if result.db_created {
+        println!("{}", "✓ Created state.sqlite database".green());
+    } else {
+        println!("{}", "~ state.sqlite already exists (not overwritten)".dimmed());
+    }
+    if result.claude_md_created {
+        println!("{}", "✓ Created CLAUDE.md (edit to customize remote setup instructions)".green());
+    } else {
+        println!("{}", "~ CLAUDE.md already exists (not overwritten)".dimmed());
+    }
+    Ok(())
+}
+
+async fn cmd_up(name: &str, profile_name: &str, sync: bool, json: bool) -> Result<()> {
     let config = crate::config::Config::load()?;
     let profile = config.get_profile(profile_name)?;
 
@@ -320,6 +358,15 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
     let db = crate::state::StateDb::open(&db_path)?;
 
     if let Ok(existing) = db.get_instance(name) {
+        if json {
+            println!("{}", json!({
+                "error": format!("Instance '{}' already exists", name),
+                "instance_id": existing.instance_id,
+                "status": existing.status,
+            }));
+            return Err(anyhow::anyhow!("Instance already exists"));
+        }
+
         let status = existing.status.as_deref().unwrap_or("unknown").to_lowercase();
 
         eprintln!("{}", format!("✗ Instance '{}' already exists.", name).red().bold());
@@ -348,14 +395,18 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
         return Err(anyhow::anyhow!("Instance already exists"));
     }
 
-    println!("{}", format!("Creating instance '{}' with profile '{}'...", name, profile_name).cyan());
+    if !json {
+        println!("{}", format!("Creating instance '{}' with profile '{}'...", name, profile_name).cyan());
+    }
 
     // Create EC2 instance
     let instance = crate::aws::ec2::run_instance(profile, name).await?;
 
-    println!("{} {}", "✓ Instance created:".green().bold(), instance.instance_id.bright_white());
-    if let Some(ip) = &instance.public_ip {
-        println!("{} {}", "✓ Public IP:".green().bold(), ip.bright_white());
+    if !json {
+        println!("{} {}", "✓ Instance created:".green().bold(), instance.instance_id.bright_white());
+        if let Some(ip) = &instance.public_ip {
+            println!("{} {}", "✓ Public IP:".green().bold(), ip.bright_white());
+        }
     }
 
     // Save to state database
@@ -364,11 +415,15 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
     db.upsert_instance(&instance)?;
     db.set_current_context(Some(name))?;
 
-    println!("{}", "✓ Saved to local state".green().bold());
+    if !json {
+        println!("{}", "✓ Saved to local state".green().bold());
+    }
 
     // Sync credentials if enabled
     if sync && profile.sync_credentials.enabled {
-        println!();
+        if !json {
+            println!();
+        }
         crate::sync::sync_credentials(&instance, profile)?;
 
         // Update last_synced timestamp
@@ -377,20 +432,31 @@ async fn cmd_up(name: &str, profile_name: &str, sync: bool) -> Result<()> {
         db.upsert_instance(&updated)?;
     }
 
-    println!();
-    println!("{} {} {}",
-        "🚀".normal(),
-        name.bright_white().bold(),
-        "is ready!".green().bold()
-    );
-    println!("   {} {}", "IP:".dimmed(), instance.public_ip.unwrap_or_default().bright_cyan());
-    println!();
-    println!("   {} {}", "Connect:".bright_white(), format!("nydus attach {}", name).truecolor(255, 165, 0).bold());
+    if json {
+        println!("{}", json!({
+            "name": instance.name,
+            "instance_id": instance.instance_id,
+            "public_ip": instance.public_ip,
+            "profile": instance.profile,
+            "region": instance.region,
+            "status": instance.status,
+        }));
+    } else {
+        println!();
+        println!("{} {} {}",
+            "🚀".normal(),
+            name.bright_white().bold(),
+            "is ready!".green().bold()
+        );
+        println!("   {} {}", "IP:".dimmed(), instance.public_ip.unwrap_or_default().bright_cyan());
+        println!();
+        println!("   {} {}", "Connect:".bright_white(), format!("nydus attach {}", name).truecolor(255, 165, 0).bold());
+    }
 
     Ok(())
 }
 
-async fn cmd_down(name: Option<&str>, yes: bool) -> Result<()> {
+async fn cmd_down(name: Option<&str>, yes: bool, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -415,7 +481,9 @@ async fn cmd_down(name: Option<&str>, yes: bool) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    println!("{}", format!("Terminating instance '{}'...", instance_name).cyan());
+    if !json {
+        println!("{}", format!("Terminating instance '{}'...", instance_name).cyan());
+    }
     crate::aws::ec2::terminate_instance(&instance).await?;
 
     // Remove from state
@@ -428,12 +496,16 @@ async fn cmd_down(name: Option<&str>, yes: bool) -> Result<()> {
         }
     }
 
-    println!("{}", "✓ Instance terminated and removed from state".green());
+    if json {
+        println!("{}", json!({"name": instance_name, "terminated": true}));
+    } else {
+        println!("{}", "✓ Instance terminated and removed from state".green());
+    }
 
     Ok(())
 }
 
-async fn cmd_stop(name: Option<&str>) -> Result<()> {
+async fn cmd_stop(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -446,7 +518,9 @@ async fn cmd_stop(name: Option<&str>) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    println!("{}", format!("Stopping instance '{}'...", instance_name).cyan());
+    if !json {
+        println!("{}", format!("Stopping instance '{}'...", instance_name).cyan());
+    }
     crate::aws::ec2::stop_instance(&instance).await?;
 
     // Update state
@@ -455,12 +529,16 @@ async fn cmd_stop(name: Option<&str>) -> Result<()> {
     updated.status = Some("stopping".to_string());
     db.upsert_instance(&updated)?;
 
-    println!("{}", "✓ Instance stopped (use 'nydus start' to restart)".green());
+    if json {
+        println!("{}", json!({"name": instance_name, "status": "stopping"}));
+    } else {
+        println!("{}", "✓ Instance stopped (use 'nydus start' to restart)".green());
+    }
 
     Ok(())
 }
 
-async fn cmd_start(name: Option<&str>) -> Result<()> {
+async fn cmd_start(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -473,7 +551,9 @@ async fn cmd_start(name: Option<&str>) -> Result<()> {
 
     let instance = db.get_instance(&instance_name)?;
 
-    println!("{}", format!("Starting instance '{}'...", instance_name).cyan());
+    if !json {
+        println!("{}", format!("Starting instance '{}'...", instance_name).cyan());
+    }
     crate::aws::ec2::start_instance(&instance).await?;
 
     // Refresh and update state
@@ -481,56 +561,49 @@ async fn cmd_start(name: Option<&str>) -> Result<()> {
     db.upsert_instance(&updated)?;
     db.set_current_context(Some(&instance_name))?;
 
-    println!("{} {}", "✓ Instance started:".green(), updated.public_ip.unwrap_or_default().bright_white());
-    println!("  {} {}", "Connect with:".yellow(), format!("nydus attach {}", instance_name).bright_white());
+    if json {
+        println!("{}", json!({
+            "name": instance_name,
+            "status": updated.status,
+            "public_ip": updated.public_ip,
+        }));
+    } else {
+        println!("{} {}", "✓ Instance started:".green(), updated.public_ip.unwrap_or_default().bright_white());
+        println!("  {} {}", "Connect with:".yellow(), format!("nydus attach {}", instance_name).bright_white());
+    }
 
     Ok(())
 }
 
-async fn cmd_terminate(name: &str, yes: bool) -> Result<()> {
-    if !yes {
-        println!("This will permanently delete the instance '{}'.", name);
-        println!("Are you sure? (y/N): ");
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
-            return Ok(());
-        }
-    }
-
-    let db_path = crate::config::state_db_path()?;
-    let db = crate::state::StateDb::open(&db_path)?;
-    let instance = db.get_instance(name)?;
-
-    println!("Terminating instance '{}'...", name);
-    crate::aws::ec2::terminate_instance(&instance).await?;
-
-    // Remove from state
-    db.delete_instance(name)?;
-
-    // Clear context if this was the current instance
-    if let Some(current) = db.get_current_context()? {
-        if current == name {
-            db.set_current_context(None)?;
-        }
-    }
-
-    println!("✓ Instance terminated and removed from state");
-
-    Ok(())
-}
-
-async fn cmd_ls(refresh: bool) -> Result<()> {
+async fn cmd_ls(refresh: bool, json: bool) -> Result<()> {
     if refresh {
-        println!("{}", "Refreshing instance status from AWS...".cyan());
-        cmd_refresh(None).await?;
-        println!();
+        if !json {
+            println!("{}", "Refreshing instance status from AWS...".cyan());
+        }
+        cmd_refresh(None, json).await?;
+        if !json {
+            println!();
+        }
     }
 
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
     let instances = db.list_instances()?;
+
+    if json {
+        let arr: Vec<serde_json::Value> = instances.iter().map(|i| {
+            json!({
+                "name": i.name,
+                "instance_id": i.instance_id,
+                "status": i.status,
+                "public_ip": i.public_ip,
+                "region": i.region,
+                "profile": i.profile,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string(&arr)?);
+        return Ok(());
+    }
 
     if instances.is_empty() {
         println!("{}", "No instances found.".yellow());
@@ -585,7 +658,7 @@ async fn cmd_ls(refresh: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status(name: Option<&str>) -> Result<()> {
+async fn cmd_status(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -601,13 +674,47 @@ async fn cmd_status(name: Option<&str>) -> Result<()> {
     // Refresh instance status
     let instance = crate::aws::ec2::refresh_instance(&instance).await?;
     let status = instance.status.as_deref().unwrap_or("unknown");
+    let status_lower = status.to_lowercase();
+    let is_running = status_lower.contains("running");
+
+    if json {
+        let mut result = json!({
+            "name": instance.name,
+            "instance_id": instance.instance_id,
+            "status": instance.status,
+            "public_ip": instance.public_ip,
+            "region": instance.region,
+            "profile": instance.profile,
+            "running": is_running,
+        });
+
+        if is_running {
+            // Get tmux state
+            let tmux_output = crate::ssh::run_remote_command(&instance,
+                "tmux list-panes -a -F '#{session_name}|#{session_attached}|#{window_index}|#{window_name}|#{window_active}|#{pane_index}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || echo 'NO_TMUX'"
+            ).unwrap_or_else(|_| "NO_TMUX".to_string());
+
+            if tmux_output.trim() != "NO_TMUX" {
+                let sessions = parse_tmux_json(&tmux_output);
+                result["tmux_sessions"] = sessions;
+            }
+
+            let claude_check = crate::ssh::run_remote_command(&instance,
+                "pgrep -f claude > /dev/null && echo 'RUNNING' || echo 'NOT_RUNNING'"
+            ).unwrap_or_default();
+            result["claude_running"] = json!(claude_check.trim() == "RUNNING");
+
+            let uptime = crate::ssh::run_remote_command(&instance, "uptime -p").unwrap_or_default();
+            result["uptime"] = json!(uptime.trim());
+        }
+
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
 
     // Print header
     println!();
     println!("{} {}", "Instance:".bright_white().bold(), instance.name.bright_cyan().bold());
-
-    let status_lower = status.to_lowercase();
-    let is_running = status_lower.contains("running");
 
     println!("{} {} ({})",
         "Status:  ".bright_white(),
@@ -663,6 +770,67 @@ async fn cmd_status(name: Option<&str>) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+fn parse_tmux_json(output: &str) -> serde_json::Value {
+    use std::collections::BTreeMap;
+
+    let mut sessions: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 8 {
+            continue;
+        }
+
+        let session_name = parts[0];
+        let session_attached = parts[1] == "1";
+        let window_index = parts[2];
+        let window_name = parts[3];
+        let window_active = parts[4] == "1";
+        let pane_index = parts[5];
+        let pane_command = parts[6];
+        let pane_path = parts[7];
+
+        let session = sessions.entry(session_name.to_string()).or_insert_with(|| {
+            json!({
+                "name": session_name,
+                "attached": session_attached,
+                "windows": [],
+            })
+        });
+
+        // Find or create window in session
+        let windows = session["windows"].as_array().cloned().unwrap_or_default();
+        let existing_window = windows.iter().position(|w| w["index"].as_str() == Some(window_index));
+
+        let pane = json!({
+            "index": pane_index,
+            "command": pane_command,
+            "path": pane_path,
+        });
+
+        if let Some(idx) = existing_window {
+            let mut windows = windows;
+            let window = &mut windows[idx];
+            if let Some(panes) = window.get_mut("panes").and_then(|p| p.as_array_mut()) {
+                panes.push(pane);
+            }
+            session["windows"] = json!(windows);
+        } else {
+            let mut windows = windows;
+            windows.push(json!({
+                "index": window_index,
+                "name": window_name,
+                "active": window_active,
+                "panes": [pane],
+            }));
+            session["windows"] = json!(windows);
+        }
+    }
+
+    let result: Vec<serde_json::Value> = sessions.into_values().collect();
+    json!(result)
 }
 
 fn display_tmux_tree(output: &str) -> Result<()> {
@@ -770,11 +938,14 @@ async fn cmd_import(
     ssh_user: &str,
     key_path: &str,
     profile_name: &str,
+    json: bool,
 ) -> Result<()> {
     let config = crate::config::Config::load()?;
     let profile = config.get_profile(profile_name)?;
 
-    println!("Importing instance {}...", instance_id);
+    if !json {
+        println!("Importing instance {}...", instance_id);
+    }
 
     let client = crate::aws::ec2::initialize_ec2_client(region).await?;
 
@@ -792,14 +963,25 @@ async fn cmd_import(
     let db = crate::state::StateDb::open(&db_path)?;
     db.upsert_instance(&instance)?;
 
-    println!("✓ Imported instance: {}", name);
-    println!("  Instance ID: {}", instance_id);
-    println!("  Public IP: {}", instance.public_ip.as_deref().unwrap_or("N/A"));
+    if json {
+        println!("{}", json!({
+            "name": instance.name,
+            "instance_id": instance.instance_id,
+            "public_ip": instance.public_ip,
+            "region": instance.region,
+            "profile": instance.profile,
+            "status": instance.status,
+        }));
+    } else {
+        println!("✓ Imported instance: {}", name);
+        println!("  Instance ID: {}", instance_id);
+        println!("  Public IP: {}", instance.public_ip.as_deref().unwrap_or("N/A"));
+    }
 
     Ok(())
 }
 
-async fn cmd_switch(name: &str) -> Result<()> {
+async fn cmd_switch(name: &str, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -808,12 +990,21 @@ async fn cmd_switch(name: &str) -> Result<()> {
 
     db.set_current_context(Some(name))?;
 
-    println!("✓ Switched to instance: {}", name);
+    if json {
+        println!("{}", json!({"name": name, "switched": true}));
+    } else {
+        println!("✓ Switched to instance: {}", name);
+    }
 
     Ok(())
 }
 
-async fn cmd_attach(name: Option<&str>) -> Result<()> {
+async fn cmd_attach(name: Option<&str>, yes: bool, json: bool) -> Result<()> {
+    if json {
+        println!("{}", json!({"error": "attach is interactive and not supported in JSON mode. Use 'nydus exec' instead."}));
+        return Ok(());
+    }
+
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -831,31 +1022,71 @@ async fn cmd_attach(name: Option<&str>) -> Result<()> {
     let ip_allowed = crate::aws::ec2::check_ip_allowed(&instance.region, &instance.instance_id, &my_ip).await?;
 
     if !ip_allowed {
-        println!();
-        println!("{}", "Your current IP is not allowed in the security group!".yellow());
-        println!("Current IP: {}", my_ip.bright_cyan());
-        println!();
-
-        use std::io::{self, Write};
-        print!("{} ", "Update security group to allow your current IP? [Y/n]:".bright_white());
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
-            println!();
+        if yes {
             println!("{} Updating security group...", "→".bright_white());
             crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
             println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
             println!();
         } else {
-            return Err(anyhow::anyhow!("Cannot connect - IP not allowed"));
+            println!();
+            println!("{}", "Your current IP is not allowed in the security group!".yellow());
+            println!("Current IP: {}", my_ip.bright_cyan());
+            println!();
+
+            use std::io::{self, Write};
+            print!("{} ", "Update security group to allow your current IP? [Y/n]:".bright_white());
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
+                println!();
+                println!("{} Updating security group...", "→".bright_white());
+                crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
+                println!("  {} SSH access allowed from {}", "✓".green(), my_ip.bright_white());
+                println!();
+            } else {
+                return Err(anyhow::anyhow!("Cannot connect - IP not allowed"));
+            }
         }
     }
 
     // Now attach
     crate::ssh::attach(&instance)?;
+    Ok(())
+}
+
+async fn cmd_exec(name: Option<&str>, command: &[String], json: bool) -> Result<()> {
+    let db_path = crate::config::state_db_path()?;
+    let db = crate::state::StateDb::open(&db_path)?;
+
+    let instance_name = if let Some(name) = name {
+        name.to_string()
+    } else {
+        db.get_current_context()?
+            .ok_or_else(|| anyhow::anyhow!("No current context. Specify instance name."))?
+    };
+
+    let instance = db.get_instance(&instance_name)?;
+
+    let cmd_str = command.join(" ");
+    let result = crate::ssh::exec(&instance, &cmd_str)?;
+
+    if json {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        if result.exit_code != 0 {
+            std::process::exit(result.exit_code);
+        }
+    }
+
     Ok(())
 }
 
@@ -880,6 +1111,7 @@ async fn cmd_forward(
     remote_host: &str,
     background: bool,
     open_browser: bool,
+    json: bool,
 ) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
@@ -924,14 +1156,23 @@ async fn cmd_forward(
         tunnel_with_pid.pid = Some(pid);
         db.create_tunnel(&tunnel_with_pid)?;
 
-        println!("✓ Tunnel started (PID: {})", pid);
-        println!("  Local: localhost:{}", local_port);
-        println!("  Remote: {}:{}", remote_host, remote_port);
+        if json {
+            println!("{}", json!({
+                "local_port": local_port,
+                "remote_port": remote_port,
+                "remote_host": remote_host,
+                "pid": pid,
+            }));
+        } else {
+            println!("✓ Tunnel started (PID: {})", pid);
+            println!("  Local: localhost:{}", local_port);
+            println!("  Remote: {}:{}", remote_host, remote_port);
 
-        if open_browser {
-            let url = format!("http://localhost:{}", local_port);
-            crate::util::open_browser(&url)?;
-            println!("  Opened browser: {}", url);
+            if open_browser {
+                let url = format!("http://localhost:{}", local_port);
+                crate::util::open_browser(&url)?;
+                println!("  Opened browser: {}", url);
+            }
         }
     } else {
         // Foreground mode - blocking
@@ -941,7 +1182,7 @@ async fn cmd_forward(
     Ok(())
 }
 
-async fn cmd_open(name: Option<&str>, remote_port: u16) -> Result<()> {
+async fn cmd_open(name: Option<&str>, remote_port: u16, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -966,13 +1207,18 @@ async fn cmd_open(name: Option<&str>, remote_port: u16) -> Result<()> {
         })?;
 
     let url = format!("http://localhost:{}", tunnel.local_port);
-    println!("Opening browser: {}", url);
-    crate::util::open_browser(&url)?;
+
+    if json {
+        println!("{}", json!({"url": url}));
+    } else {
+        println!("Opening browser: {}", url);
+        crate::util::open_browser(&url)?;
+    }
 
     Ok(())
 }
 
-async fn cmd_sync(name: Option<&str>) -> Result<()> {
+async fn cmd_sync(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -994,10 +1240,14 @@ async fn cmd_sync(name: Option<&str>) -> Result<()> {
     updated.last_synced = Some(crate::util::current_timestamp());
     db.upsert_instance(&updated)?;
 
+    if json {
+        println!("{}", json!({"name": instance_name, "synced": true}));
+    }
+
     Ok(())
 }
 
-async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Result<()> {
+async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
     let config = crate::config::Config::load()?;
@@ -1021,38 +1271,46 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
         profile_regions.into_iter().collect()
     };
 
-    println!("{}", "Discovering nydus-managed instances from AWS...".bright_white());
-    println!("Regions: {}", regions_to_query.join(", ").dimmed());
-    println!();
+    if !json {
+        println!("{}", "Discovering nydus-managed instances from AWS...".bright_white());
+        println!("Regions: {}", regions_to_query.join(", ").dimmed());
+        println!();
+    }
 
     // Discover instances from AWS
     let discovered = crate::aws::ec2::discover_nydus_instances(regions_to_query).await?;
 
     if discovered.is_empty() {
-        println!("{}", "No nydus-managed instances found in AWS.".yellow());
+        if json {
+            println!("{}", json!({"synced": 0, "new": 0, "updated": 0, "skipped": 0}));
+        } else {
+            println!("{}", "No nydus-managed instances found in AWS.".yellow());
+        }
         return Ok(());
     }
 
-    // Show what will be synced
-    println!("{} instances found:", discovered.len().to_string().bright_white());
-    for instance in &discovered {
-        let status_display = instance.status.as_deref().unwrap_or("unknown");
-        let status_colored = if status_display.to_lowercase().contains("running") {
-            status_display.green()
-        } else {
-            status_display.yellow()
-        };
+    if !json {
+        // Show what will be synced
+        println!("{} instances found:", discovered.len().to_string().bright_white());
+        for instance in &discovered {
+            let status_display = instance.status.as_deref().unwrap_or("unknown");
+            let status_colored = if status_display.to_lowercase().contains("running") {
+                status_display.green()
+            } else {
+                status_display.yellow()
+            };
 
-        println!(
-            "  {} {} ({}) - {} in {}",
-            "•".bright_white(),
-            instance.name.bright_cyan(),
-            status_colored,
-            instance.instance_id.dimmed(),
-            instance.region.dimmed()
-        );
+            println!(
+                "  {} {} ({}) - {} in {}",
+                "•".bright_white(),
+                instance.name.bright_cyan(),
+                status_colored,
+                instance.instance_id.dimmed(),
+                instance.region.dimmed()
+            );
+        }
+        println!();
     }
-    println!();
 
     // Prompt for confirmation unless --yes flag
     if !skip_confirm {
@@ -1070,7 +1328,9 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
     }
 
     // Sync to local state
-    println!("{}", "Syncing to local state...".bright_white());
+    if !json {
+        println!("{}", "Syncing to local state...".bright_white());
+    }
     let mut synced_count = 0;
     let mut updated_count = 0;
     let mut skipped_count = 0;
@@ -1094,7 +1354,9 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
             });
 
             if is_terminated && has_active_duplicate {
-                println!("  {} Skipped {} (terminated, active instance exists)", "⊘".yellow(), instance.name.dimmed());
+                if !json {
+                    println!("  {} Skipped {} (terminated, active instance exists)", "⊘".yellow(), instance.name.dimmed());
+                }
                 skipped_count += 1;
                 continue;
             }
@@ -1102,7 +1364,9 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
             // Otherwise append instance ID suffix to make unique
             let short_id = &instance.instance_id[instance.instance_id.len().saturating_sub(8)..];
             instance.name = format!("{}-{}", instance.name, short_id);
-            println!("  {} Renamed to {} (duplicate name)", "✓".green(), instance.name.bright_white());
+            if !json {
+                println!("  {} Renamed to {} (duplicate name)", "✓".green(), instance.name.bright_white());
+            }
         }
 
         // Check if instance already exists in local state
@@ -1110,47 +1374,64 @@ async fn cmd_sync_state(regions: Option<&[String]>, skip_confirm: bool) -> Resul
 
         if existing.is_some() {
             updated_count += 1;
-            println!("  {} Updated {}", "↻".yellow(), instance.name.dimmed());
+            if !json {
+                println!("  {} Updated {}", "↻".yellow(), instance.name.dimmed());
+            }
         } else {
             synced_count += 1;
-            println!("  {} Added {}", "✓".green(), instance.name.bright_white());
+            if !json {
+                println!("  {} Added {}", "✓".green(), instance.name.bright_white());
+            }
         }
 
         db.upsert_instance(&instance)?;
     }
 
-    println!();
-    if skipped_count > 0 {
-        println!(
-            "{} {} instances synced ({} new, {} updated, {} skipped)",
-            "✓".green(),
-            (synced_count + updated_count).to_string().bright_white(),
-            synced_count.to_string().green(),
-            updated_count.to_string().yellow(),
-            skipped_count.to_string().dimmed()
-        );
+    if json {
+        println!("{}", json!({
+            "synced": synced_count + updated_count,
+            "new": synced_count,
+            "updated": updated_count,
+            "skipped": skipped_count,
+        }));
     } else {
-        println!(
-            "{} {} instances synced ({} new, {} updated)",
-            "✓".green(),
-            (synced_count + updated_count).to_string().bright_white(),
-            synced_count.to_string().green(),
-            updated_count.to_string().yellow()
-        );
+        println!();
+        if skipped_count > 0 {
+            println!(
+                "{} {} instances synced ({} new, {} updated, {} skipped)",
+                "✓".green(),
+                (synced_count + updated_count).to_string().bright_white(),
+                synced_count.to_string().green(),
+                updated_count.to_string().yellow(),
+                skipped_count.to_string().dimmed()
+            );
+        } else {
+            println!(
+                "{} {} instances synced ({} new, {} updated)",
+                "✓".green(),
+                (synced_count + updated_count).to_string().bright_white(),
+                synced_count.to_string().green(),
+                updated_count.to_string().yellow()
+            );
+        }
     }
 
     Ok(())
 }
 
-async fn cmd_update_ip(name: Option<&str>) -> Result<()> {
+async fn cmd_update_ip(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
     // Get current public IP
-    println!("{}", "Getting your current public IP...".bright_white());
+    if !json {
+        println!("{}", "Getting your current public IP...".bright_white());
+    }
     let my_ip = crate::aws::ec2::get_my_public_ip().await?;
-    println!("Current IP: {}", my_ip.bright_cyan());
-    println!();
+    if !json {
+        println!("Current IP: {}", my_ip.bright_cyan());
+        println!();
+    }
 
     // Get instances to update
     let instances: Vec<_> = if let Some(name) = name {
@@ -1160,42 +1441,75 @@ async fn cmd_update_ip(name: Option<&str>) -> Result<()> {
     };
 
     if instances.is_empty() {
-        println!("{}", "No instances found.".yellow());
+        if json {
+            println!("{}", json!({"ip": my_ip, "instances_updated": []}));
+        } else {
+            println!("{}", "No instances found.".yellow());
+        }
         return Ok(());
     }
 
+    let mut updated_names = Vec::new();
+
     // Update security group for each instance
-    for instance in instances {
-        println!(
-            "{} Updating security group for {}...",
-            "→".bright_white(),
-            instance.name.bright_cyan()
-        );
+    for instance in &instances {
+        if !json {
+            println!(
+                "{} Updating security group for {}...",
+                "→".bright_white(),
+                instance.name.bright_cyan()
+            );
+        }
 
         // Update the security group
         crate::aws::ec2::update_security_group_ip(&instance.region, &instance.instance_id, &my_ip).await?;
 
-        println!(
-            "  {} SSH access allowed from {}",
-            "✓".green(),
-            my_ip.bright_white()
-        );
+        updated_names.push(instance.name.clone());
+
+        if !json {
+            println!(
+                "  {} SSH access allowed from {}",
+                "✓".green(),
+                my_ip.bright_white()
+            );
+        }
     }
 
-    println!();
-    println!(
-        "{} Security groups updated! You can now SSH from your current network.",
-        "✓".green()
-    );
+    if json {
+        println!("{}", json!({"ip": my_ip, "instances_updated": updated_names}));
+    } else {
+        println!();
+        println!(
+            "{} Security groups updated! You can now SSH from your current network.",
+            "✓".green()
+        );
+    }
 
     Ok(())
 }
 
-async fn cmd_tunnels(name: Option<&str>) -> Result<()> {
+async fn cmd_tunnels(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
     let tunnels = db.list_tunnels(name)?;
+
+    if json {
+        let arr: Vec<serde_json::Value> = tunnels.iter().map(|t| {
+            let is_alive = t.pid.map_or(false, |p| crate::util::is_process_alive(p));
+            json!({
+                "id": t.id,
+                "instance_name": t.instance_name,
+                "remote_host": t.remote_host,
+                "remote_port": t.remote_port,
+                "local_port": t.local_port,
+                "pid": t.pid,
+                "status": if is_alive { "active" } else { "stopped" },
+            })
+        }).collect();
+        println!("{}", serde_json::to_string(&arr)?);
+        return Ok(());
+    }
 
     if tunnels.is_empty() {
         println!("No tunnels found.");
@@ -1227,7 +1541,7 @@ async fn cmd_tunnels(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_tunnel_stop(id: i64) -> Result<()> {
+async fn cmd_tunnel_stop(id: i64, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -1240,8 +1554,10 @@ async fn cmd_tunnel_stop(id: i64) -> Result<()> {
     if let Some(pid) = tunnel.pid {
         if crate::util::is_process_alive(pid) {
             crate::ssh::stop_tunnel(pid)?;
-            println!("✓ Stopped tunnel {} (PID: {})", id, pid);
-        } else {
+            if !json {
+                println!("✓ Stopped tunnel {} (PID: {})", id, pid);
+            }
+        } else if !json {
             println!("⚠ Tunnel {} already stopped", id);
         }
     }
@@ -1249,37 +1565,65 @@ async fn cmd_tunnel_stop(id: i64) -> Result<()> {
     // Remove from database
     db.delete_tunnel(id)?;
 
+    if json {
+        println!("{}", json!({"id": id, "stopped": true}));
+    }
+
     Ok(())
 }
 
-async fn cmd_profile(cmd: ProfileCommands) -> Result<()> {
+async fn cmd_profile(cmd: ProfileCommands, json: bool) -> Result<()> {
     match cmd {
         ProfileCommands::List => {
             let config = crate::config::Config::load()?;
-            println!("\nProfiles:");
-            for profile in &config.profiles {
-                println!("  - {} ({})", profile.name, profile.region);
+            if json {
+                let arr: Vec<serde_json::Value> = config.profiles.iter().map(|p| {
+                    json!({
+                        "name": p.name,
+                        "region": p.region,
+                        "instance_type": p.instance_type,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string(&arr)?);
+            } else {
+                println!("\nProfiles:");
+                for profile in &config.profiles {
+                    println!("  - {} ({})", profile.name, profile.region);
+                }
             }
         }
         ProfileCommands::Show { name } => {
             let config = crate::config::Config::load()?;
             let profile = config.get_profile(&name)?;
-            println!("\nProfile: {}", profile.name);
-            println!("  Region: {}", profile.region);
-            println!("  Instance Type: {}", profile.instance_type);
-            println!("  SSH User: {}", profile.ssh_user);
-            println!("  SSH Key: {}", profile.ssh_key_path);
-            println!("  Volume Size: {}GB", profile.volume_size_gb);
-            if let Some(ami) = &profile.ami {
-                println!("  AMI: {}", ami);
-            }
-            if !profile.tags.is_empty() {
-                println!("  Tags:");
-                for (k, v) in &profile.tags {
-                    println!("    {}: {}", k, v);
+            if json {
+                println!("{}", json!({
+                    "name": profile.name,
+                    "region": profile.region,
+                    "instance_type": profile.instance_type,
+                    "ssh_user": profile.ssh_user,
+                    "ssh_key_path": profile.ssh_key_path,
+                    "volume_size_gb": profile.volume_size_gb,
+                    "ami": profile.ami,
+                    "credential_sync": profile.sync_credentials.enabled,
+                }));
+            } else {
+                println!("\nProfile: {}", profile.name);
+                println!("  Region: {}", profile.region);
+                println!("  Instance Type: {}", profile.instance_type);
+                println!("  SSH User: {}", profile.ssh_user);
+                println!("  SSH Key: {}", profile.ssh_key_path);
+                println!("  Volume Size: {}GB", profile.volume_size_gb);
+                if let Some(ami) = &profile.ami {
+                    println!("  AMI: {}", ami);
                 }
+                if !profile.tags.is_empty() {
+                    println!("  Tags:");
+                    for (k, v) in &profile.tags {
+                        println!("    {}: {}", k, v);
+                    }
+                }
+                println!("  Credential Sync: {}", profile.sync_credentials.enabled);
             }
-            println!("  Credential Sync: {}", profile.sync_credentials.enabled);
         }
         ProfileCommands::Add { name } => {
             let mut config = crate::config::Config::load()?;
@@ -1289,14 +1633,18 @@ async fn cmd_profile(cmd: ProfileCommands) -> Result<()> {
             };
             config.upsert_profile(new_profile);
             config.save()?;
-            println!("{} {}", "✓ Added profile:".green(), name.bright_white());
-            println!("  Edit ~/.nydus/config.yml to configure");
+            if json {
+                println!("{}", json!({"name": name, "added": true}));
+            } else {
+                println!("{} {}", "✓ Added profile:".green(), name.bright_white());
+                println!("  Edit ~/.nydus/config.yml to configure");
+            }
         }
     }
     Ok(())
 }
 
-async fn cmd_refresh(name: Option<&str>) -> Result<()> {
+async fn cmd_refresh(name: Option<&str>, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -1307,13 +1655,21 @@ async fn cmd_refresh(name: Option<&str>) -> Result<()> {
     };
 
     if instances.is_empty() {
-        println!("{}", "No instances to refresh.".yellow());
+        if json {
+            println!("[]");
+        } else {
+            println!("{}", "No instances to refresh.".yellow());
+        }
         return Ok(());
     }
 
+    let mut results = Vec::new();
+
     for instance in instances {
-        print!("{} {}... ", "Refreshing".cyan(), instance.name.bright_white());
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        if !json {
+            print!("{} {}... ", "Refreshing".cyan(), instance.name.bright_white());
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+        }
 
         match crate::aws::ec2::refresh_instance(&instance).await {
             Ok(updated) => {
@@ -1330,15 +1686,23 @@ async fn cmd_refresh(name: Option<&str>) -> Result<()> {
                         }
                     }
 
-                    println!("{}", "terminated (removed)".red().dimmed());
+                    if json {
+                        results.push(json!({"name": instance.name, "status": "terminated", "removed": true}));
+                    } else {
+                        println!("{}", "terminated (removed)".red().dimmed());
+                    }
                 } else {
                     db.upsert_instance(&updated)?;
-                    let status_colored = match status {
-                        s if s.contains("running") => s.green(),
-                        s if s.contains("stopped") => s.yellow(),
-                        s => s.normal(),
-                    };
-                    println!("{}", status_colored);
+                    if json {
+                        results.push(json!({"name": instance.name, "status": status}));
+                    } else {
+                        let status_colored = match status {
+                            s if s.contains("running") => s.green(),
+                            s if s.contains("stopped") => s.yellow(),
+                            s => s.normal(),
+                        };
+                        println!("{}", status_colored);
+                    }
                 }
             }
             Err(e) => {
@@ -1355,19 +1719,31 @@ async fn cmd_refresh(name: Option<&str>) -> Result<()> {
                         }
                     }
 
-                    println!("{}", "not found in AWS (removed)".red().dimmed());
+                    if json {
+                        results.push(json!({"name": instance.name, "status": "not_found", "removed": true}));
+                    } else {
+                        println!("{}", "not found in AWS (removed)".red().dimmed());
+                    }
                 } else {
-                    println!("{}", format!("error: {}", e).red());
-                    println!("{} {}", "  Consider running:".yellow(), format!("nydus forget {}", instance.name).bright_white());
+                    if json {
+                        results.push(json!({"name": instance.name, "error": err_msg}));
+                    } else {
+                        println!("{}", format!("error: {}", e).red());
+                        println!("{} {}", "  Consider running:".yellow(), format!("nydus forget {}", instance.name).bright_white());
+                    }
                 }
             }
         }
     }
 
+    if json {
+        println!("{}", serde_json::to_string(&results)?);
+    }
+
     Ok(())
 }
 
-async fn cmd_forget(name: &str, yes: bool) -> Result<()> {
+async fn cmd_forget(name: &str, yes: bool, json: bool) -> Result<()> {
     let db_path = crate::config::state_db_path()?;
     let db = crate::state::StateDb::open(&db_path)?;
 
@@ -1400,8 +1776,12 @@ async fn cmd_forget(name: &str, yes: bool) -> Result<()> {
         }
     }
 
-    println!("{} {}", "✓ Removed from local state:".green(), name.bright_white());
-    println!("{}", "  Note: EC2 instance may still exist in AWS".dimmed());
+    if json {
+        println!("{}", json!({"name": name, "forgotten": true}));
+    } else {
+        println!("{} {}", "✓ Removed from local state:".green(), name.bright_white());
+        println!("{}", "  Note: EC2 instance may still exist in AWS".dimmed());
+    }
 
     Ok(())
 }

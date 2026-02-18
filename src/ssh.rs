@@ -1,6 +1,49 @@
 use crate::config::{Instance, Tunnel};
 use crate::error::{NydusError, Result};
+use serde::Serialize;
 use std::process::{Command, Stdio};
+
+/// Result of executing a command on a remote instance
+#[derive(Debug, Serialize)]
+pub struct ExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+/// Execute a command on remote instance, capturing stdout/stderr/exit_code separately
+pub fn exec(instance: &Instance, command: &str) -> Result<ExecResult> {
+    let ssh_key_path = &instance.ssh_key_path;
+    let ssh_user = &instance.ssh_user;
+    let host = instance
+        .public_ip
+        .as_ref()
+        .or(instance.public_dns.as_ref())
+        .ok_or_else(|| NydusError::SshError("Instance has no public IP or DNS".to_string()))?;
+
+    let output = Command::new("ssh")
+        .arg("-A")
+        .arg("-i")
+        .arg(ssh_key_path)
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg(format!("{}@{}", ssh_user, host))
+        .arg(command)
+        .output()
+        .map_err(|e| NydusError::SshError(format!("Failed to run ssh: {}", e)))?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Ok(ExecResult {
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
 
 /// Attach to instance via interactive SSH session
 pub fn attach(instance: &Instance) -> Result<()> {
