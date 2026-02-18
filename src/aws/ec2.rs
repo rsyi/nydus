@@ -1,7 +1,7 @@
 use crate::config::{Instance, Profile};
 use crate::error::{NydusError, Result};
 use crate::util;
-use aws_sdk_ec2::types::{Filter, InstanceStateName, ResourceType, Tag, TagSpecification};
+use aws_sdk_ec2::types::{BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, Tag, TagSpecification, VolumeType};
 use aws_sdk_ec2::Client;
 use colored::*;
 use std::time::Instant;
@@ -69,6 +69,18 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
         .set_tags(Some(tags))
         .build();
 
+    // Configure root volume size
+    let block_device = BlockDeviceMapping::builder()
+        .device_name("/dev/sda1")
+        .ebs(
+            EbsBlockDevice::builder()
+                .volume_size(profile.volume_size_gb as i32)
+                .volume_type(VolumeType::Gp3)
+                .delete_on_termination(true)
+                .build(),
+        )
+        .build();
+
     // Launch instance
     let run_result = client
         .run_instances()
@@ -84,6 +96,7 @@ pub async fn run_instance(profile: &Profile, name: &str) -> Result<Instance> {
         .min_count(1)
         .set_security_group_ids(Some(vec![security_group_id]))
         .set_subnet_id(profile.subnet_id.clone())
+        .block_device_mappings(block_device)
         .tag_specifications(tag_spec)
         .send()
         .await
