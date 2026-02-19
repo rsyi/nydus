@@ -1050,6 +1050,10 @@ async fn cmd_attach(name: Option<&str>, yes: bool, json: bool) -> Result<()> {
                 return Err(anyhow::anyhow!("Cannot connect - IP not allowed"));
             }
         }
+
+        // Wait for AWS security group rule to propagate before attempting SSH
+        println!("{} Waiting for security group to propagate...", "→".bright_white());
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 
     // Now attach

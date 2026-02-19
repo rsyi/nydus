@@ -68,6 +68,8 @@ pub fn attach(instance: &Instance) -> Result<()> {
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
         .arg("-t")  // Force pseudo-terminal allocation for tmux
         .arg(format!("{}@{}", ssh_user, host))
         .arg(tmux_command)
